@@ -1,4 +1,4 @@
-import { useCallback, useRef, useEffect, useState } from "react";
+import { useCallback, useRef, useEffect, useState, useMemo } from "react";
 import { usePlayerStore } from "../../stores/playerStore.ts";
 import { PlaybackControls } from "./PlaybackControls.tsx";
 import { Waveform } from "./Waveform.tsx";
@@ -6,7 +6,9 @@ import { ZoomedWaveform } from "./ZoomedWaveform.tsx";
 import { Button } from "../ui/button.tsx";
 import { EQControls } from "../mixer/EQControls.tsx";
 import { OutputSelector } from "../mixer/OutputSelector.tsx";
-import type { Peaks3Band } from "../../../shared/types.ts";
+import { CueToolbar } from "./CueToolbar.tsx";
+import { useCueStore } from "../../stores/cueStore.ts";
+import type { Peaks3Band, CuePoint } from "../../../shared/types.ts";
 
 interface TrackRowProps {
   trackId: string;
@@ -21,6 +23,8 @@ interface TrackRowProps {
     isPlaying: boolean;
     volume: number;
     deviceId: number;
+    previewPosition: number | null;
+    lockedPosition: number | null;
   };
   onWaveformRef?: (el: HTMLDivElement | null) => void;
 }
@@ -82,6 +86,14 @@ function formatTime(seconds: number): string {
 
 export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
   const removeTrack = usePlayerStore((s) => s.removeTrack);
+  const cuesMap = useCueStore((s) => s.cues);
+  const trackCues = useMemo(() => {
+    const result: CuePoint[] = [];
+    for (const cue of cuesMap.values()) {
+      if (cue.trackId === trackId) result.push(cue);
+    }
+    return result;
+  }, [cuesMap, trackId]);
   const timeRef = useRef<HTMLSpanElement>(null);
   const [editingBpm, setEditingBpm] = useState(false);
   const [bpmValue, setBpmValue] = useState(
@@ -90,11 +102,14 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
   const [customBeats, setCustomBeats] = useState<number[] | null>(null);
   const [downbeatOffset, setDownbeatOffset] = useState(0); // 0-3: which beat index is "1"
 
+  const positionRef = useRef(state.position);
+
   // Direct DOM update for time display — no React re-render
   useEffect(() => {
     const handler = (e: Event) => {
       const { trackId: tid, position } = (e as CustomEvent).detail;
       if (tid !== trackId) return;
+      positionRef.current = position;
       if (timeRef.current) timeRef.current.textContent = formatTime(position);
     };
     window.addEventListener("dj:playbackTick", handler);
@@ -106,12 +121,49 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
     removeTrack(trackId);
   }, [trackId, removeTrack]);
 
+  const setPreviewPosition = usePlayerStore((s) => s.setPreviewPosition);
+  const setLockedPosition = usePlayerStore((s) => s.setLockedPosition);
+
   const handleSeek = useCallback(
     (seconds: number) => {
+      positionRef.current = seconds;
       window.djRpc?.request?.seek?.({ trackId, seconds });
     },
     [trackId]
   );
+
+  const handlePreview = useCallback(
+    (seconds: number | null) => {
+      setPreviewPosition(trackId, seconds);
+      // Also lock zoomed waveform to preview position
+      if (seconds !== null) {
+        setLockedPosition(trackId, seconds);
+      }
+    },
+    [trackId, setPreviewPosition, setLockedPosition]
+  );
+
+  const handleLockedPositionChange = useCallback(
+    (pos: number) => {
+      setLockedPosition(trackId, pos);
+    },
+    [trackId, setLockedPosition]
+  );
+
+  // Space = lock at current preview, Esc = unlock
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+      if (e.code === "Escape") {
+        setLockedPosition(trackId, null);
+        setPreviewPosition(trackId, null);
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [trackId, setLockedPosition, setPreviewPosition]);
 
   // BPM editing — recalculates beat grid from manual BPM
   const handleBpmSubmit = useCallback(() => {
@@ -165,6 +217,10 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
             beats={displayBeats}
             downbeatOffset={downbeatOffset}
             zoom={10}
+            isPlaying={state.isPlaying}
+            lockedPosition={state.lockedPosition}
+            onLockedPositionChange={handleLockedPositionChange}
+            cues={trackCues}
           />
         </div>
       </div>
@@ -217,7 +273,22 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
           >
             1:{downbeatOffset + 1}
           </span>
+          {displayBpm > 0 && (
+            <span
+              className="text-[7px] font-bold px-1 py-0.5 rounded bg-emerald-500/10 text-emerald-400 cursor-pointer hover:bg-emerald-500/20"
+              onClick={() => {
+                usePlayerStore.getState().setMasterBpm(displayBpm);
+                window.djRpc?.request?.setMasterBpm?.({ bpm: displayBpm });
+              }}
+              title="Set as master tempo"
+            >
+              SYNC
+            </span>
+          )}
         </div>
+
+        {/* Cue toolbar */}
+        <CueToolbar trackId={trackId} getPosition={() => state.lockedPosition ?? positionRef.current} beats={displayBeats} />
 
         {/* Overview waveform */}
         <Waveform
@@ -226,7 +297,11 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
           duration={state.track.duration}
           beats={displayBeats}
           downbeatOffset={downbeatOffset}
+          isPlaying={state.isPlaying}
+          previewPosition={state.previewPosition}
+          cues={trackCues}
           onSeek={handleSeek}
+          onPreview={handlePreview}
           onContainerRef={onWaveformRef}
         />
 

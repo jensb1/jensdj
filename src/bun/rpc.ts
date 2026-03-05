@@ -123,6 +123,18 @@ export function createRPC() {
           engine.cancelScheduledStart(trackId);
         },
 
+        setLoop: ({ trackId, startSec, endSec }) => {
+          engine.setLoop(trackId, startSec, endSec);
+        },
+
+        clearLoop: ({ trackId }) => {
+          engine.clearLoop(trackId);
+        },
+
+        setMasterBpm: ({ bpm }) => {
+          engine.setMasterBpm(bpm);
+        },
+
         getPlaybackState: ({ trackId }) => {
           return {
             position: engine.getPosition(trackId),
@@ -209,10 +221,12 @@ export function startPlaybackTicker(webview: any, intervalMs = 16) {
   return setInterval(() => {
     for (const trackId of engine.getAllTrackIds()) {
       if (engine.isPlaying(trackId)) {
+        const loop = engine.getActiveLoop(trackId);
         webview.rpc?.send?.playbackTick?.({
           trackId,
           position: engine.getPosition(trackId),
           level: engine.getLevel(trackId),
+          ...(loop ? { loopStart: loop.start, loopEnd: loop.end } : {}),
         });
       }
     }

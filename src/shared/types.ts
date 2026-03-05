@@ -58,6 +58,20 @@ export interface BeatConnection {
   targetBeat: number;
 }
 
+// Cue / marker point
+export type ConnectionAction = 'start' | 'stop' | 'loop';
+
+export interface CuePoint {
+  id: string;
+  trackId: string;
+  label: string;        // 'A', 'B', 'C', 'D', ...
+  time: number;         // seconds, snapped to beat
+  color: string;
+  connectedCueId?: string;       // linked cue on another track
+  connectedTrackId?: string;     // track of the linked cue
+  connectionAction?: ConnectionAction; // what happens when playback reaches this cue (default: 'start')
+}
+
 // RPC type definitions for Electrobun
 export type MainViewRPC = {
   bun: RPCSchema<{
@@ -115,6 +129,18 @@ export type MainViewRPC = {
         params: { trackId: string };
         response: void;
       };
+      setLoop: {
+        params: { trackId: string; startSec: number; endSec: number };
+        response: void;
+      };
+      clearLoop: {
+        params: { trackId: string };
+        response: void;
+      };
+      setMasterBpm: {
+        params: { bpm: number };
+        response: void;
+      };
       getPlaybackState: {
         params: { trackId: string };
         response: PlaybackState;
@@ -147,6 +173,8 @@ export type MainViewRPC = {
         trackId: string;
         position: number;
         level: number;
+        loopStart?: number;
+        loopEnd?: number;
       };
       scanProgress: {
         current: number;

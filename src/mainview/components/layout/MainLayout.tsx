@@ -2,7 +2,84 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { TrackList } from "../tracks/TrackList.tsx";
 import { LibraryPanel } from "../library/LibraryPanel.tsx";
 import { usePlayerStore } from "../../stores/playerStore.ts";
+import { syncPlay } from "../../utils/syncPlay.ts";
 import { Button } from "../ui/button.tsx";
+
+function MasterTempo() {
+  const masterBpm = usePlayerStore((s) => s.masterBpm);
+  const setMasterBpm = usePlayerStore((s) => s.setMasterBpm);
+  const tracks = usePlayerStore((s) => s.tracks);
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState("");
+
+  const applyBpm = (bpm: number) => {
+    setMasterBpm(bpm);
+    window.djRpc?.request?.setMasterBpm?.({ bpm });
+  };
+
+  const handleSubmit = () => {
+    const val = parseFloat(editValue);
+    if (val > 0 && val <= 300) applyBpm(val);
+    setEditing(false);
+  };
+
+  // Find first track with BPM for "Sync" button
+  const firstTrackBpm = (() => {
+    for (const [, state] of tracks) {
+      if (state.track.metadata.bpm > 0) return state.track.metadata.bpm;
+    }
+    return 0;
+  })();
+
+  return (
+    <div className="flex items-center gap-1.5 ml-4 px-2 py-0.5 rounded bg-zinc-800/60 border border-zinc-700/50">
+      <span className="text-[9px] text-zinc-500 font-semibold uppercase">Master</span>
+      {editing ? (
+        <input
+          type="text"
+          value={editValue}
+          onChange={(e) => setEditValue(e.target.value)}
+          onBlur={handleSubmit}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") handleSubmit();
+            if (e.key === "Escape") setEditing(false);
+          }}
+          autoFocus
+          className="w-14 h-5 text-[10px] font-mono font-bold text-center bg-zinc-700 text-emerald-300 border border-emerald-500/50 rounded outline-none"
+        />
+      ) : (
+        <span
+          className="text-[11px] font-mono font-bold px-1.5 py-0.5 rounded cursor-pointer hover:bg-zinc-700/50"
+          style={{ color: masterBpm > 0 ? "#34d399" : "#71717a" }}
+          onClick={() => {
+            setEditValue(masterBpm > 0 ? masterBpm.toFixed(1) : firstTrackBpm > 0 ? firstTrackBpm.toFixed(1) : "");
+            setEditing(true);
+          }}
+        >
+          {masterBpm > 0 ? masterBpm.toFixed(1) : "OFF"}
+        </span>
+      )}
+      <button
+        onClick={() => applyBpm(Math.max(1, masterBpm - 0.1))}
+        className="text-[10px] text-zinc-500 hover:text-zinc-300 px-0.5"
+        disabled={masterBpm === 0}
+      >-</button>
+      <button
+        onClick={() => applyBpm(masterBpm > 0 ? masterBpm + 0.1 : firstTrackBpm > 0 ? firstTrackBpm : 120)}
+        className="text-[10px] text-zinc-500 hover:text-zinc-300 px-0.5"
+      >+</button>
+      {masterBpm > 0 && (
+        <button
+          onClick={() => applyBpm(0)}
+          className="text-[8px] text-zinc-600 hover:text-red-400 px-1"
+          title="Disable master tempo"
+        >
+          OFF
+        </button>
+      )}
+    </div>
+  );
+}
 
 export function MainLayout() {
   const [loading, setLoading] = useState(false);
@@ -15,7 +92,21 @@ export function MainLayout() {
     window.djRpc?.request?.getOutputDevices?.({} as never)?.then((devices) => {
       if (devices) setDevices(devices);
     });
-  }, [setDevices]);
+    // Auto-load two test tracks for faster testing
+    const autoLoad = async () => {
+      const testPath = "/Volumes/MUSIC/all/acid pauli - nana.mp3";
+      try {
+        const t1 = await window.djRpc?.request?.loadTrack?.({ filePath: testPath });
+        if (t1) addTrack(t1);
+        const t2 = await window.djRpc?.request?.loadTrack?.({ filePath: testPath });
+        if (t2) addTrack(t2);
+        console.log("[UI] Auto-loaded 2 test tracks");
+      } catch (e) {
+        console.warn("[UI] Auto-load failed:", e);
+      }
+    };
+    autoLoad();
+  }, [setDevices, addTrack]);
 
   const handleAddTrack = async () => {
     setLoading(true);
@@ -87,8 +178,7 @@ export function MainLayout() {
           window.djRpc?.request?.pause?.({ trackId: targetId });
           usePlayerStore.getState().setPlaying(targetId, false);
         } else {
-          window.djRpc?.request?.play?.({ trackId: targetId });
-          usePlayerStore.getState().setPlaying(targetId, true);
+          syncPlay(targetId);
         }
       }
     };
@@ -127,6 +217,7 @@ export function MainLayout() {
         <Button onClick={handleLoadTestTrack} disabled={loading} variant="secondary" size="sm">
           Test Load
         </Button>
+        <MasterTempo />
         <div className="flex items-center gap-1 ml-2">
           <input
             ref={pathInputRef}

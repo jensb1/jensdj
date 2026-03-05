@@ -1,10 +1,8 @@
 import { useRef, useEffect, useCallback, useState } from "react";
 import { usePlayerStore } from "../../stores/playerStore.ts";
-import { useBeatDragStore } from "../../stores/beatDragStore.ts";
-import { useConnectionStore } from "../../stores/connectionStore.ts";
 import { TrackRow } from "./TrackRow.tsx";
-import { BeatConnections } from "./BeatConnections.tsx";
-import { ConnectionMonitor } from "./ConnectionMonitor.tsx";
+import { CueConnections } from "./CueConnections.tsx";
+import { CueMonitor } from "./CueMonitor.tsx";
 
 interface TrackLayout {
   trackId: string;
@@ -52,86 +50,11 @@ export function TrackList() {
     return () => observer.disconnect();
   }, [updateLayouts]);
 
-  // Also update after tracks change
   useEffect(() => {
-    // Small delay to let DOM settle after track add/remove
     const t = setTimeout(updateLayouts, 100);
     return () => clearTimeout(t);
   }, [trackEntries.length, updateLayouts]);
 
-  // Global mouse move/up for beat dragging across tracks
-  useEffect(() => {
-    const onMove = (e: MouseEvent) => {
-      const drag = useBeatDragStore.getState().drag;
-      if (drag) {
-        useBeatDragStore.getState().updateDrag(e.clientX, e.clientY);
-      }
-    };
-    const onUp = (e: MouseEvent) => {
-      const drag = useBeatDragStore.getState().drag;
-      if (!drag) return;
-
-      // Find which waveform the mouse is over
-      const container = containerRef.current;
-      if (!container) {
-        useBeatDragStore.getState().endDrag();
-        return;
-      }
-
-      for (const [trackId, layout] of trackLayouts.entries()) {
-        if (trackId === drag.sourceTrackId) continue;
-        const containerRect = container.getBoundingClientRect();
-        const absTop = containerRect.top + layout.top;
-        const absLeft = containerRect.left + layout.left;
-
-        if (
-          e.clientX >= absLeft &&
-          e.clientX <= absLeft + layout.width &&
-          e.clientY >= absTop &&
-          e.clientY <= absTop + layout.height
-        ) {
-          // Find nearest BAR beat (every 4th = "1" beat) in target track
-          const trackState = tracks.get(trackId);
-          if (trackState && trackState.track.beats.length > 0) {
-            const relX = e.clientX - absLeft;
-            const pct = relX / layout.width;
-            const time = pct * layout.duration;
-
-            let closestBeat = trackState.track.beats[0] ?? 0;
-            let minDist = Infinity;
-            for (let i = 0; i < trackState.track.beats.length; i += 4) {
-              const bt = trackState.track.beats[i] ?? 0;
-              const dist = Math.abs(bt - time);
-              if (dist < minDist) {
-                minDist = dist;
-                closestBeat = bt;
-              }
-            }
-
-            useConnectionStore.getState().addConnection({
-              sourceTrackId: drag.sourceTrackId,
-              sourceBeatTime: drag.sourceBeatTime,
-              targetTrackId: trackId,
-              targetBeatTime: closestBeat,
-            });
-            // No auto-play — ConnectionMonitor triggers when source reaches the beat
-          }
-          break;
-        }
-      }
-
-      useBeatDragStore.getState().endDrag();
-    };
-
-    document.addEventListener("mousemove", onMove);
-    document.addEventListener("mouseup", onUp);
-    return () => {
-      document.removeEventListener("mousemove", onMove);
-      document.removeEventListener("mouseup", onUp);
-    };
-  }, [trackLayouts, tracks]);
-
-  // Register waveform ref callback
   const registerWaveformRef = useCallback((trackId: string, el: HTMLDivElement | null) => {
     if (el) {
       waveformRefs.current.set(trackId, el);
@@ -164,8 +87,8 @@ export function TrackList() {
           onWaveformRef={(el) => registerWaveformRef(id, el)}
         />
       ))}
-      <BeatConnections trackLayouts={trackLayouts} />
-      <ConnectionMonitor />
+      <CueConnections trackLayouts={trackLayouts} />
+      <CueMonitor />
     </div>
   );
 }

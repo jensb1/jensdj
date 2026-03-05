@@ -7,11 +7,15 @@ export interface TrackState {
   isPlaying: boolean;
   volume: number;
   deviceId: number;
+  previewPosition: number | null;
+  lockedPosition: number | null; // when set, zoomed waveform stays here instead of following playback
+  level: number;
 }
 
 interface PlayerStore {
   tracks: Map<string, TrackState>;
   devices: OutputDevice[];
+  masterBpm: number; // 0 = off, >0 = all tracks sync to this
 
   addTrack: (track: LoadedTrack) => void;
   removeTrack: (trackId: string) => void;
@@ -20,11 +24,16 @@ interface PlayerStore {
   setVolume: (trackId: string, volume: number) => void;
   setDeviceId: (trackId: string, deviceId: number) => void;
   setDevices: (devices: OutputDevice[]) => void;
+  setPreviewPosition: (trackId: string, position: number | null) => void;
+  setLockedPosition: (trackId: string, position: number | null) => void;
+  setLevel: (trackId: string, level: number) => void;
+  setMasterBpm: (bpm: number) => void;
 }
 
 export const usePlayerStore = create<PlayerStore>((set) => ({
   tracks: new Map(),
   devices: [],
+  masterBpm: 0,
 
   addTrack: (track) =>
     set((state) => {
@@ -35,6 +44,9 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
         isPlaying: false,
         volume: 1,
         deviceId: -1,
+        previewPosition: null,
+        lockedPosition: null,
+        level: 0,
       });
       return { tracks };
     }),
@@ -83,6 +95,35 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
     }),
 
   setDevices: (devices) => set({ devices }),
+
+  setPreviewPosition: (trackId, position) =>
+    set((state) => {
+      const existing = state.tracks.get(trackId);
+      if (!existing) return state;
+      const tracks = new Map(state.tracks);
+      tracks.set(trackId, { ...existing, previewPosition: position });
+      return { tracks };
+    }),
+
+  setLockedPosition: (trackId, position) =>
+    set((state) => {
+      const existing = state.tracks.get(trackId);
+      if (!existing) return state;
+      const tracks = new Map(state.tracks);
+      tracks.set(trackId, { ...existing, lockedPosition: position });
+      return { tracks };
+    }),
+
+  setLevel: (trackId, level) =>
+    set((state) => {
+      const existing = state.tracks.get(trackId);
+      if (!existing) return state;
+      const tracks = new Map(state.tracks);
+      tracks.set(trackId, { ...existing, level });
+      return { tracks };
+    }),
+
+  setMasterBpm: (bpm) => set({ masterBpm: bpm }),
 }));
 
 // Position updates go directly to DOM via TrackRow refs (no React re-render).

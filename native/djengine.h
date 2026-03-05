@@ -30,11 +30,16 @@ float dj_get_duration(void* sound);
 int dj_is_playing(void* sound);
 void dj_set_volume(void* sound, float volume);
 
-// EQ (3-band: lo, mid, hi — values in dB, 0 = unity)
+// EQ (3-band: lo, mid, hi — gain 0..2, 1 = unity)
 void dj_set_eq(void* sound, float lo, float mid, float hi);
 
 // Level metering (returns RMS 0..1)
 float dj_get_level(void* sound);
+
+// Loop control
+void dj_set_loop(void* sound, float start_seconds, float end_seconds);
+void dj_clear_loop(void* sound);
+int dj_is_looping(void* sound);
 
 // Scheduled sync playback
 // Schedules target_sound to start playing from target_seconds,

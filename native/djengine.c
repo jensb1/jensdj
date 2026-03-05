@@ -21,6 +21,24 @@
 #define RB_BLOCK_SIZE 1024
 #define MAX_CHANNELS 2
 
+// Low-pass filter (2nd order Butterworth)
+typedef struct {
+    float x1, x2, y1, y2;
+    float b0, b1, b2, a1, a2;
+} LPFilter;
+
+static void lp_init(LPFilter* f, float cutoff_hz, float samplerate);
+static float lp_process(LPFilter* f, float x);
+
+// High-pass filter (2nd order Butterworth)
+typedef struct {
+    float x1, x2, y1, y2;
+    float b0, b1, b2, a1, a2;
+} HPFilter;
+
+static void hp_init(HPFilter* f, float cutoff_hz, float samplerate);
+static float hp_process(HPFilter* f, float x);
+
 typedef struct {
     ma_context context;
     ma_device_info playback_devices[MAX_DEVICES];
@@ -50,6 +68,23 @@ typedef struct {
     // Deinterleaved temp buffers
     float* deinterleaved_in[MAX_CHANNELS];
     float* deinterleaved_out[MAX_CHANNELS];
+
+    // Per-channel 3-band EQ filters (cascaded 2nd-order = 4th-order Butterworth)
+    LPFilter eq_lo_lp[MAX_CHANNELS][2];   // LP at 250Hz
+    HPFilter eq_hi_hp[MAX_CHANNELS][2];   // HP at 4000Hz
+    float* eq_lo_gain;   // pointer to DJSound.eq_lo
+    float* eq_mid_gain;  // pointer to DJSound.eq_mid
+    float* eq_hi_gain;   // pointer to DJSound.eq_hi
+
+    // Real RMS metering
+    double rms_sum;
+    ma_uint64 rms_count;
+    float current_rms;
+
+    // Loop points
+    ma_uint64 loop_start_frame;
+    ma_uint64 loop_end_frame;
+    int loop_active;
 } DJStretchedSource;
 
 typedef struct {
@@ -85,14 +120,36 @@ static ma_result stretched_read(ma_data_source* pDataSource, void* pFramesOut, m
             // Retrieve into deinterleaved buffers
             unsigned int retrieved = rubberband_retrieve(src->rb, src->deinterleaved_out, to_retrieve);
 
-            // Interleave into output
+            // Interleave into output + apply 3-band EQ + accumulate RMS
+            float lo_g = src->eq_lo_gain ? *src->eq_lo_gain : 1.0f;
+            float mi_g = src->eq_mid_gain ? *src->eq_mid_gain : 1.0f;
+            float hi_g = src->eq_hi_gain ? *src->eq_hi_gain : 1.0f;
+
             for (unsigned int i = 0; i < retrieved; i++) {
                 for (unsigned int ch = 0; ch < src->channels; ch++) {
-                    out[(frames_written + i) * src->channels + ch] = src->deinterleaved_out[ch][i];
+                    float sample = src->deinterleaved_out[ch][i];
+                    // Split into 3 bands
+                    float lo = lp_process(&src->eq_lo_lp[ch][1],
+                               lp_process(&src->eq_lo_lp[ch][0], sample));
+                    float hi = hp_process(&src->eq_hi_hp[ch][1],
+                               hp_process(&src->eq_hi_hp[ch][0], sample));
+                    float mid = sample - lo - hi;
+                    // Apply gains and sum
+                    float result = lo * lo_g + mid * mi_g + hi * hi_g;
+                    out[(frames_written + i) * src->channels + ch] = result;
+                    // RMS accumulation
+                    src->rms_sum += (double)(result * result);
+                    src->rms_count++;
                 }
             }
             frames_written += retrieved;
             continue;
+        }
+
+        // Loop support: wrap cursor at loop end
+        if (src->loop_active && src->read_cursor >= src->loop_end_frame && src->loop_end_frame > src->loop_start_frame) {
+            src->read_cursor = src->loop_start_frame;
+            rubberband_reset(src->rb);
         }
 
         // Need to feed more input to Rubber Band
@@ -106,6 +163,18 @@ static ma_result stretched_read(ma_data_source* pDataSource, void* pFramesOut, m
             to_feed = (unsigned int)(src->total_frames - src->read_cursor);
         }
 
+        // If looping, don't feed past loop end
+        if (src->loop_active && src->loop_end_frame > src->loop_start_frame) {
+            if (src->read_cursor + to_feed > src->loop_end_frame) {
+                to_feed = (unsigned int)(src->loop_end_frame - src->read_cursor);
+                if (to_feed == 0) {
+                    src->read_cursor = src->loop_start_frame;
+                    rubberband_reset(src->rb);
+                    continue;
+                }
+            }
+        }
+
         // Deinterleave input
         for (unsigned int i = 0; i < to_feed; i++) {
             for (unsigned int ch = 0; ch < src->channels; ch++) {
@@ -114,6 +183,7 @@ static ma_result stretched_read(ma_data_source* pDataSource, void* pFramesOut, m
         }
 
         int is_final = (src->read_cursor + to_feed >= src->total_frames) ? 1 : 0;
+        if (src->loop_active) is_final = 0; // never signal final when looping
         rubberband_process(src->rb, (const float* const*)src->deinterleaved_in, to_feed, is_final);
         src->read_cursor += to_feed;
     }
@@ -231,6 +301,23 @@ static DJStretchedSource* create_stretched_source(const char* filepath, ma_uint3
                            | RubberBandOptionThreadingNever;
     src->rb = rubberband_new(target_samplerate, target_channels, opts, 1.0, 1.0);
     rubberband_set_max_process_size(src->rb, RB_BLOCK_SIZE);
+
+    // Initialize per-channel EQ filters
+    for (unsigned int ch = 0; ch < target_channels; ch++) {
+        lp_init(&src->eq_lo_lp[ch][0], 250.0f, (float)target_samplerate);
+        lp_init(&src->eq_lo_lp[ch][1], 250.0f, (float)target_samplerate);
+        hp_init(&src->eq_hi_hp[ch][0], 4000.0f, (float)target_samplerate);
+        hp_init(&src->eq_hi_hp[ch][1], 4000.0f, (float)target_samplerate);
+    }
+    src->eq_lo_gain = NULL;
+    src->eq_mid_gain = NULL;
+    src->eq_hi_gain = NULL;
+    src->rms_sum = 0;
+    src->rms_count = 0;
+    src->current_rms = 0;
+    src->loop_start_frame = 0;
+    src->loop_end_frame = 0;
+    src->loop_active = 0;
 
     // Init data source base
     ma_data_source_config baseConfig = ma_data_source_config_init();
@@ -372,11 +459,16 @@ void* dj_load_sound(void* engine, const char* filepath) {
     snd->engine = eng;
     snd->source = source;
     snd->volume = 1.0f;
-    snd->eq_lo = 0.0f;
-    snd->eq_mid = 0.0f;
-    snd->eq_hi = 0.0f;
+    snd->eq_lo = 1.0f;
+    snd->eq_mid = 1.0f;
+    snd->eq_hi = 1.0f;
     snd->current_level = 0.0f;
     snd->original_bpm = 0.0f;
+
+    // Wire EQ gain pointers so stretched_read can access them directly
+    source->eq_lo_gain = &snd->eq_lo;
+    source->eq_mid_gain = &snd->eq_mid;
+    source->eq_hi_gain = &snd->eq_hi;
 
     return snd;
 }
@@ -537,7 +629,7 @@ int dj_cancel_scheduled_start(void* sound) {
     return 0;
 }
 
-// --- EQ (simplified) ---
+// --- EQ (3-band gain: 0=kill, 1=unity, 2=boost) ---
 
 void dj_set_eq(void* sound, float lo, float mid, float hi) {
     if (!sound) return;
@@ -547,13 +639,45 @@ void dj_set_eq(void* sound, float lo, float mid, float hi) {
     snd->eq_hi = hi;
 }
 
-// --- Level metering ---
+// --- Loop control ---
+
+void dj_set_loop(void* sound, float start_seconds, float end_seconds) {
+    if (!sound) return;
+    DJSound* snd = (DJSound*)sound;
+    if (!snd->source) return;
+    ma_uint32 sr = snd->source->sample_rate;
+    snd->source->loop_start_frame = (ma_uint64)(start_seconds * (float)sr);
+    snd->source->loop_end_frame = (ma_uint64)(end_seconds * (float)sr);
+    snd->source->loop_active = 1;
+}
+
+void dj_clear_loop(void* sound) {
+    if (!sound) return;
+    DJSound* snd = (DJSound*)sound;
+    if (!snd->source) return;
+    snd->source->loop_active = 0;
+}
+
+int dj_is_looping(void* sound) {
+    if (!sound) return 0;
+    DJSound* snd = (DJSound*)sound;
+    if (!snd->source) return 0;
+    return snd->source->loop_active;
+}
+
+// --- Level metering (real RMS) ---
 
 float dj_get_level(void* sound) {
     if (!sound) return 0.0f;
     DJSound* snd = (DJSound*)sound;
     if (!ma_sound_is_playing(&snd->sound)) return 0.0f;
-    return snd->volume * 0.7f;
+    DJStretchedSource* src = snd->source;
+    if (!src || src->rms_count == 0) return 0.0f;
+    float rms = (float)sqrt(src->rms_sum / (double)src->rms_count);
+    // Reset for next measurement window
+    src->rms_sum = 0;
+    src->rms_count = 0;
+    return rms * snd->volume;
 }
 
 // --- Waveform peaks ---
@@ -617,13 +741,7 @@ int dj_get_peaks(const char* filepath, float* out_peaks, int num_points) {
     return 0;
 }
 
-// --- Butterworth filter primitives (shared by 3-band peaks + transient detection) ---
-
-// Low-pass filter (2nd order Butterworth)
-typedef struct {
-    float x1, x2, y1, y2;
-    float b0, b1, b2, a1, a2;
-} LPFilter;
+// --- Butterworth filter implementations ---
 
 static void lp_init(LPFilter* f, float cutoff_hz, float samplerate) {
     float w0 = 2.0f * (float)M_PI * cutoff_hz / samplerate;
@@ -646,12 +764,6 @@ static float lp_process(LPFilter* f, float x) {
     f->y2 = f->y1; f->y1 = y;
     return y;
 }
-
-// High-pass filter (2nd order Butterworth)
-typedef struct {
-    float x1, x2, y1, y2;
-    float b0, b1, b2, a1, a2;
-} HPFilter;
 
 static void hp_init(HPFilter* f, float cutoff_hz, float samplerate) {
     float w0 = 2.0f * (float)M_PI * cutoff_hz / samplerate;

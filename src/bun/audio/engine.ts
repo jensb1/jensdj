@@ -22,8 +22,12 @@ import {
   djSetTempo,
   djGetTempo,
   djSetOriginalBpm,
+  djGetOriginalBpm,
   djScheduleSyncPlay,
   djCancelScheduledStart,
+  djSetLoop,
+  djClearLoop,
+  djIsLooping,
   djGetPeaks3Band,
   djDetectBpm,
   djDetectBeats,
@@ -33,7 +37,11 @@ import type {
   LoadedTrack,
   TrackMetadata,
   EQSettings,
+  Peaks3Band,
 } from "../../shared/types.ts";
+import { join } from "path";
+import { homedir } from "os";
+import { createHash } from "crypto";
 
 interface InternalTrack {
   id: string;
@@ -46,12 +54,49 @@ interface InternalTrack {
 
 const NUM_PEAKS = 50000;
 const MAX_BEATS = 4000;
+const CACHE_DIR = join(homedir(), ".jensdj", "cache");
+
+interface AnalysisCache {
+  peaks: Peaks3Band;
+  bpm: number;
+  beats: number[];
+}
+
+function cacheKey(filePath: string): string {
+  return createHash("md5").update(filePath).digest("hex");
+}
+
+function readCache(filePath: string): AnalysisCache | null {
+  try {
+    const p = join(CACHE_DIR, cacheKey(filePath) + ".json");
+    const f = Bun.file(p);
+    if (f.size === 0) return null;
+    // Bun.file().text() is async but we need sync — use require("fs")
+    const text = require("fs").readFileSync(p, "utf-8");
+    const data = JSON.parse(text);
+    if (data?.peaks?.low && data?.bpm !== undefined && data?.beats) return data;
+    return null;
+  } catch { return null; }
+}
+
+function writeCache(filePath: string, data: AnalysisCache): void {
+  try {
+    const dir = CACHE_DIR;
+    try { require("fs").mkdirSync(dir, { recursive: true }); } catch {}
+    const p = join(dir, cacheKey(filePath) + ".json");
+    Bun.write(p, JSON.stringify(data));
+  } catch (e) {
+    console.warn("[Cache] Write failed:", e);
+  }
+}
 
 export class AudioEngine {
   private tracks = new Map<string, InternalTrack>();
   private engines = new Map<number, NativePtr>();
   private nextId = 1;
   private initialized = false;
+  private _masterBpm = 0;
+  private _activeLoops = new Map<string, { start: number; end: number }>();
 
   init(): boolean {
     if (this.initialized) return true;
@@ -133,6 +178,10 @@ export class AudioEngine {
     // Store BPM in native engine for auto-sync
     if (analysis.bpm > 0) {
       djSetOriginalBpm(soundPtr, analysis.bpm);
+      // Auto-sync to master BPM if set
+      if (this._masterBpm > 0) {
+        djSetTempo(soundPtr, this._masterBpm / analysis.bpm);
+      }
     }
 
     return {
@@ -147,11 +196,23 @@ export class AudioEngine {
   }
 
   private analyze(filePath: string) {
+    // Check cache first
+    const cached = readCache(filePath);
+    if (cached) {
+      console.log("[AudioEngine] Cache hit:", filePath);
+      return cached;
+    }
+
+    console.log("[AudioEngine] Analyzing (no cache):", filePath);
     const peaks3 = djGetPeaks3Band(filePath, NUM_PEAKS);
     const peaks = peaks3 ?? { low: Array(NUM_PEAKS).fill(0), mid: Array(NUM_PEAKS).fill(0), high: Array(NUM_PEAKS).fill(0) };
     const bpm = djDetectBpm(filePath);
     const beatsBuf = djDetectBeats(filePath, MAX_BEATS);
     const beats = Array.from(beatsBuf);
+
+    // Write to cache
+    writeCache(filePath, { peaks, bpm, beats });
+
     return { peaks, bpm, beats };
   }
 
@@ -266,6 +327,48 @@ export class AudioEngine {
     const track = this.tracks.get(trackId);
     if (!track) return;
     djCancelScheduledStart(track.soundPtr);
+  }
+
+  setLoop(trackId: string, startSec: number, endSec: number): void {
+    const track = this.tracks.get(trackId);
+    if (!track) return;
+    djSetLoop(track.soundPtr, startSec, endSec);
+    this._activeLoops.set(trackId, { start: startSec, end: endSec });
+  }
+
+  clearLoop(trackId: string): void {
+    const track = this.tracks.get(trackId);
+    if (!track) return;
+    djClearLoop(track.soundPtr);
+    this._activeLoops.delete(trackId);
+  }
+
+  getActiveLoop(trackId: string): { start: number; end: number } | null {
+    return this._activeLoops.get(trackId) ?? null;
+  }
+
+  isLooping(trackId: string): boolean {
+    const track = this.tracks.get(trackId);
+    if (!track) return false;
+    return djIsLooping(track.soundPtr);
+  }
+
+  setMasterBpm(bpm: number): void {
+    this._masterBpm = bpm;
+    for (const [, track] of this.tracks) {
+      const originalBpm = djGetOriginalBpm(track.soundPtr);
+      if (originalBpm > 0 && bpm > 0) {
+        djSetTempo(track.soundPtr, bpm / originalBpm);
+      } else if (bpm === 0) {
+        djSetTempo(track.soundPtr, 1.0); // Reset to original tempo
+      }
+    }
+  }
+
+  getOriginalBpm(trackId: string): number {
+    const track = this.tracks.get(trackId);
+    if (!track) return 0;
+    return djGetOriginalBpm(track.soundPtr);
   }
 
   getAllTrackIds(): string[] {

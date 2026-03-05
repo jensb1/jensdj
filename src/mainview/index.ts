@@ -12,10 +12,10 @@ const rpc = Electroview.defineRPC<MainViewRPC>({
   handlers: {
     requests: {},
     messages: {
-      playbackTick: ({ trackId, position }) => {
+      playbackTick: ({ trackId, position, level, loopStart, loopEnd }) => {
         window.dispatchEvent(
           new CustomEvent("dj:playbackTick", {
-            detail: { trackId, position },
+            detail: { trackId, position, level, loopStart, loopEnd },
           })
         );
       },

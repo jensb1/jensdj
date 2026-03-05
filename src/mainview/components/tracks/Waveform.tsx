@@ -1,5 +1,6 @@
 import { useRef, useEffect, useCallback } from "react";
-import type { Peaks3Band } from "../../../shared/types.ts";
+import type { Peaks3Band, CuePoint } from "../../../shared/types.ts";
+import { CueMarkers } from "./CueMarkers.tsx";
 
 interface WaveformProps {
   trackId: string;
@@ -7,11 +8,15 @@ interface WaveformProps {
   duration: number;
   beats?: number[];
   downbeatOffset?: number;
+  isPlaying?: boolean;
+  previewPosition?: number | null;
+  cues?: CuePoint[];
   onSeek: (seconds: number) => void;
+  onPreview?: (seconds: number | null) => void;
   onContainerRef?: (el: HTMLDivElement | null) => void;
 }
 
-export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, onSeek, onContainerRef }: WaveformProps) {
+export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, isPlaying = false, previewPosition, cues, onSeek, onPreview, onContainerRef }: WaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -87,7 +92,10 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
     }
   }, [peaks, duration]);
 
-  // Draw the dynamic overlay (played region + playhead)
+  // Draw the dynamic overlay (played region + playhead + preview cursor + loop)
+  const previewPctRef = useRef<number | null>(null);
+  const loopPctRef = useRef<{ start: number; end: number } | null>(null);
+
   const drawOverlay = useCallback((canvas: HTMLCanvasElement, pct: number) => {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
@@ -107,17 +115,49 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
       ctx.fillRect(0, 0, x, h);
     }
 
-    ctx.strokeStyle = "rgba(129, 140, 248, 0.9)";
+    // Playhead: RED when playing, indigo when paused
+    ctx.strokeStyle = isPlaying ? "rgba(239, 68, 68, 0.95)" : "rgba(129, 140, 248, 0.9)";
     ctx.lineWidth = 1.5;
-    ctx.shadowColor = "rgba(99, 102, 241, 0.6)";
+    ctx.shadowColor = isPlaying ? "rgba(239, 68, 68, 0.6)" : "rgba(99, 102, 241, 0.6)";
     ctx.shadowBlur = 4;
     ctx.beginPath();
     ctx.moveTo(x, 0);
     ctx.lineTo(x, h);
     ctx.stroke();
+    ctx.shadowBlur = 0;
+
+    // Loop region highlight
+    const lp = loopPctRef.current;
+    if (lp) {
+      const lx1 = lp.start * w;
+      const lx2 = lp.end * w;
+      ctx.fillStyle = "rgba(249, 115, 22, 0.15)";
+      ctx.fillRect(lx1, 0, lx2 - lx1, h);
+      ctx.strokeStyle = "rgba(249, 115, 22, 0.6)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 2]);
+      ctx.beginPath(); ctx.moveTo(lx1, 0); ctx.lineTo(lx1, h); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(lx2, 0); ctx.lineTo(lx2, h); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    // Amber preview cursor
+    const pvPct = previewPctRef.current;
+    if (pvPct !== null) {
+      const px = pvPct * w;
+      ctx.strokeStyle = "rgba(245, 158, 11, 0.9)";
+      ctx.lineWidth = 1.5;
+      ctx.shadowColor = "rgba(245, 158, 11, 0.5)";
+      ctx.shadowBlur = 3;
+      ctx.beginPath();
+      ctx.moveTo(px, 0);
+      ctx.lineTo(px, h);
+      ctx.stroke();
+      ctx.shadowBlur = 0;
+    }
 
     ctx.restore();
-  }, []);
+  }, [isPlaying]);
 
   // Initial draw + resize observer
   useEffect(() => {
@@ -148,9 +188,12 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
   // Playback ticks
   useEffect(() => {
     const handler = (e: Event) => {
-      const { trackId: tid, position } = (e as CustomEvent).detail;
+      const { trackId: tid, position, loopStart, loopEnd } = (e as CustomEvent).detail;
       if (tid !== trackId || duration <= 0) return;
       playheadPct.current = position / duration;
+      loopPctRef.current = (loopStart != null && loopEnd != null)
+        ? { start: loopStart / duration, end: loopEnd / duration }
+        : null;
       if (!animFrameRef.current) {
         animFrameRef.current = requestAnimationFrame(() => {
           const overlay = overlayRef.current;
@@ -164,15 +207,24 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
       window.removeEventListener("dj:playbackTick", handler);
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
     };
-  }, [trackId, duration, drawOverlay]);
+  }, [trackId, duration, drawOverlay, isPlaying]);
 
-  // Drag-to-scrub
+  // Update preview from prop
+  useEffect(() => {
+    if (previewPosition !== null && previewPosition !== undefined && duration > 0) {
+      previewPctRef.current = previewPosition / duration;
+    } else {
+      previewPctRef.current = null;
+    }
+  }, [previewPosition, duration]);
+
+  // Drag-to-scrub (or preview when playing)
   const isDragging = useRef(false);
 
-  const seekFromX = useCallback(
-    (clientX: number) => {
+  const timeFromX = useCallback(
+    (clientX: number): number => {
       const el = containerRef.current;
-      if (!el || duration <= 0) return;
+      if (!el || duration <= 0) return 0;
       const rect = el.getBoundingClientRect();
       const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
       let time = pct * duration;
@@ -187,27 +239,40 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
         }
         time = nearest;
       }
-
-      onSeek(time);
+      return time;
     },
-    [duration, onSeek, beats, downbeatOffset]
+    [duration, beats, downbeatOffset]
   );
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
       e.preventDefault();
       isDragging.current = true;
-      seekFromX(e.clientX);
-      const onMove = (ev: MouseEvent) => { if (isDragging.current) seekFromX(ev.clientX); };
+      const time = timeFromX(e.clientX);
+      if (isPlaying) {
+        onPreview?.(time);
+      } else {
+        onSeek(time);
+      }
+      const onMove = (ev: MouseEvent) => {
+        if (!isDragging.current) return;
+        const t = timeFromX(ev.clientX);
+        if (isPlaying) {
+          onPreview?.(t);
+        } else {
+          onSeek(t);
+        }
+      };
       const onUp = () => {
         isDragging.current = false;
+        if (isPlaying) onPreview?.(null);
         window.removeEventListener("mousemove", onMove);
         window.removeEventListener("mouseup", onUp);
       };
       window.addEventListener("mousemove", onMove);
       window.addEventListener("mouseup", onUp);
     },
-    [seekFromX]
+    [timeFromX, isPlaying, onSeek, onPreview]
   );
 
   return (
@@ -216,11 +281,20 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
         (containerRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
         onContainerRef?.(el);
       }}
-      className="relative flex-1 h-7 bg-zinc-800/40 rounded-md overflow-hidden cursor-pointer"
+      className="relative flex-1 h-7 bg-zinc-800/40 rounded-md cursor-pointer"
       onMouseDown={handleMouseDown}
     >
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
       <canvas ref={overlayRef} className="absolute inset-0 w-full h-full" />
+      {cues && cues.length > 0 && (
+        <CueMarkers
+          cues={cues}
+          duration={duration}
+          containerWidth={containerRef.current?.getBoundingClientRect().width ?? 0}
+          trackId={trackId}
+          onGoto={onSeek}
+        />
+      )}
       {peaks.low.length === 0 && (
         <span className="absolute inset-0 flex items-center justify-center text-[10px] text-zinc-600">
           No waveform data

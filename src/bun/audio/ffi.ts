@@ -69,6 +69,18 @@ const lib = dlopen(libPath, {
     args: [FFIType.ptr],
     returns: FFIType.i32,
   },
+  dj_set_loop: {
+    args: [FFIType.ptr, FFIType.f32, FFIType.f32],
+    returns: FFIType.void,
+  },
+  dj_clear_loop: {
+    args: [FFIType.ptr],
+    returns: FFIType.void,
+  },
+  dj_is_looping: {
+    args: [FFIType.ptr],
+    returns: FFIType.i32,
+  },
   dj_get_peaks: {
     args: [FFIType.cstring, FFIType.ptr, FFIType.i32],
     returns: FFIType.i32,
@@ -208,6 +220,17 @@ export const djScheduleSyncPlay = (
 
 export const djCancelScheduledStart = (sound: NativePtr): number =>
   s.dj_cancel_scheduled_start(sound as unknown as Pointer);
+
+export const djSetLoop = (sound: NativePtr, startSec: number, endSec: number): void => {
+  s.dj_set_loop(sound as unknown as Pointer, startSec, endSec);
+};
+
+export const djClearLoop = (sound: NativePtr): void => {
+  s.dj_clear_loop(sound as unknown as Pointer);
+};
+
+export const djIsLooping = (sound: NativePtr): boolean =>
+  s.dj_is_looping(sound as unknown as Pointer) === 1;
 
 export const djGetPeaks = (
   filepath: string,

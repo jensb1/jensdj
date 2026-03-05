@@ -1,5 +1,6 @@
 import { useCallback } from "react";
 import { usePlayerStore } from "../../stores/playerStore.ts";
+import { syncPlay } from "../../utils/syncPlay.ts";
 import { Button } from "../ui/button.tsx";
 
 interface PlaybackControlsProps {
@@ -10,10 +11,7 @@ interface PlaybackControlsProps {
 export function PlaybackControls({ trackId, isPlaying }: PlaybackControlsProps) {
   const setPlaying = usePlayerStore((s) => s.setPlaying);
 
-  const handlePlay = useCallback(async () => {
-    await window.djRpc?.request?.play?.({ trackId });
-    setPlaying(trackId, true);
-  }, [trackId, setPlaying]);
+  const handlePlay = useCallback(() => syncPlay(trackId), [trackId]);
 
   const handlePause = useCallback(async () => {
     await window.djRpc?.request?.pause?.({ trackId });
@@ -23,7 +21,6 @@ export function PlaybackControls({ trackId, isPlaying }: PlaybackControlsProps) 
   const handleStop = useCallback(async () => {
     await window.djRpc?.request?.stop?.({ trackId });
     setPlaying(trackId, false);
-    // Reset connection triggers so they can fire again on next play
     window.dispatchEvent(new CustomEvent("dj:connectionsReset"));
   }, [trackId, setPlaying]);
 

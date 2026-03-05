@@ -1,5 +1,5 @@
 import { useRef, useEffect, useCallback, useState } from "react";
-import type { Peaks3Band } from "../../../shared/types.ts";
+import type { Peaks3Band, CuePoint } from "../../../shared/types.ts";
 
 interface ZoomedWaveformProps {
   trackId: string;
@@ -8,12 +8,23 @@ interface ZoomedWaveformProps {
   beats?: number[];
   downbeatOffset?: number;
   zoom: number; // seconds visible in viewport
+  isPlaying?: boolean;
+  lockedPosition?: number | null;
+  onLockedPositionChange?: (pos: number) => void;
+  cues?: CuePoint[];
 }
 
-export function ZoomedWaveform({ trackId, peaks, duration, beats, downbeatOffset = 0, zoom }: ZoomedWaveformProps) {
+export function ZoomedWaveform({
+  trackId, peaks, duration, beats, downbeatOffset = 0, zoom,
+  isPlaying = false, lockedPosition, onLockedPositionChange, cues,
+}: ZoomedWaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number>(0);
-  const currentPosition = useRef(0);
+  const playbackPosition = useRef(0);
+  const viewPosition = useRef(0);
+  const loopRegion = useRef<{ start: number; end: number } | null>(null);
+
+  const isLocked = lockedPosition != null;
 
   // Convert a time (seconds) to canvas x coordinate
   const timeToX = (time: number, timeStart: number, w: number) =>
@@ -33,7 +44,7 @@ export function ZoomedWaveform({ trackId, peaks, duration, beats, downbeatOffset
   };
 
   const draw = useCallback(
-    (canvas: HTMLCanvasElement, position: number) => {
+    (canvas: HTMLCanvasElement, centerPos: number, playPos?: number) => {
       const ctx = canvas.getContext("2d");
       if (!ctx || duration <= 0 || peaks.low.length === 0) return;
 
@@ -54,15 +65,14 @@ export function ZoomedWaveform({ trackId, peaks, duration, beats, downbeatOffset
       ctx.clearRect(0, 0, w, h);
 
       const halfWindow = zoom / 2;
-      const timeStart = position - halfWindow;
+      const timeStart = centerPos - halfWindow;
 
-      // Draw 3-band stacked waveform (Rekordbox-style)
+      // Draw 3-band stacked waveform
       const numPoints = Math.ceil(w);
       const step = zoom / numPoints;
       const centerX = w / 2;
       const scale = h * 0.42;
 
-      // Per-band normalization for visual balance
       let maxLo = 0, maxMi = 0, maxHi = 0;
       for (let j = 0; j < peaks.low.length; j++) {
         if ((peaks.low[j] ?? 0) > maxLo) maxLo = peaks.low[j]!;
@@ -76,8 +86,6 @@ export function ZoomedWaveform({ trackId, peaks, duration, beats, downbeatOffset
       const normPeak = (band: number[], maxB: number, t: number) =>
         peakAt(band, t) / maxB;
 
-      // Draw blue first (outermost), orange on top, white on top (innermost)
-      // Each layer uses max(own, inner) so blue extends beyond orange at kicks
       const layers = [
         { env: (t: number) => Math.max(normPeak(peaks.low, maxLo, t), normPeak(peaks.mid, maxMi, t), normPeak(peaks.high, maxHi, t)),
           bright: "#2563ff", dim: "#2563ff" },
@@ -101,7 +109,6 @@ export function ZoomedWaveform({ trackId, peaks, duration, beats, downbeatOffset
           ctx.lineTo(i, mid + amp);
         }
         ctx.closePath();
-
         ctx.save();
         ctx.clip();
         ctx.fillStyle = bright;
@@ -111,14 +118,14 @@ export function ZoomedWaveform({ trackId, peaks, duration, beats, downbeatOffset
         ctx.restore();
       }
 
-      // Draw beat grid lines (on top of waveform)
+      // Draw beat grid lines
       if (beats && beats.length > 0) {
         for (let i = 0; i < beats.length; i++) {
           const bt = beats[i] ?? 0;
           if (bt < timeStart - 1 || bt > timeStart + zoom + 1) continue;
           const x = timeToX(bt, timeStart, w);
           const isBar = (i - downbeatOffset + 400) % 4 === 0;
-          if (!isBar) continue; // only draw downbeat markers
+          if (!isBar) continue;
           ctx.strokeStyle = "rgba(236, 72, 153, 0.8)";
           ctx.lineWidth = 2;
           ctx.beginPath();
@@ -128,43 +135,144 @@ export function ZoomedWaveform({ trackId, peaks, duration, beats, downbeatOffset
         }
       }
 
-      // Center playhead line
-      ctx.strokeStyle = "rgba(255, 255, 255, 0.9)";
+      // Draw active loop region
+      const loop = loopRegion.current;
+      if (loop) {
+        const lx1 = timeToX(loop.start, timeStart, w);
+        const lx2 = timeToX(loop.end, timeStart, w);
+        const clampL = Math.max(0, Math.min(w, lx1));
+        const clampR = Math.max(0, Math.min(w, lx2));
+        if (clampR > clampL) {
+          ctx.fillStyle = "rgba(249, 115, 22, 0.12)";
+          ctx.fillRect(clampL, 0, clampR - clampL, h);
+          // Loop boundaries
+          ctx.strokeStyle = "rgba(249, 115, 22, 0.7)";
+          ctx.lineWidth = 2;
+          ctx.setLineDash([4, 3]);
+          if (lx1 >= 0 && lx1 <= w) {
+            ctx.beginPath(); ctx.moveTo(lx1, 0); ctx.lineTo(lx1, h); ctx.stroke();
+          }
+          if (lx2 >= 0 && lx2 <= w) {
+            ctx.beginPath(); ctx.moveTo(lx2, 0); ctx.lineTo(lx2, h); ctx.stroke();
+          }
+          ctx.setLineDash([]);
+        }
+      }
+
+      // Draw cue markers
+      if (cues && cues.length > 0) {
+        for (const cue of cues) {
+          if (cue.time < timeStart - 1 || cue.time > timeStart + zoom + 1) continue;
+          const cx = timeToX(cue.time, timeStart, w);
+          // Vertical line
+          ctx.strokeStyle = cue.color;
+          ctx.lineWidth = 2;
+          ctx.globalAlpha = 0.8;
+          ctx.beginPath();
+          ctx.moveTo(cx, 0);
+          ctx.lineTo(cx, h);
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+          // Label badge
+          ctx.fillStyle = cue.color;
+          ctx.fillRect(cx, 0, 14, 12);
+          ctx.fillStyle = "#000";
+          ctx.font = "bold 9px monospace";
+          ctx.fillText(cue.label, cx + 3, 10);
+        }
+      }
+
+      // When locked, draw the real playback position as a moving red line
+      if (playPos !== undefined && isLocked) {
+        const playX = timeToX(playPos, timeStart, w);
+        if (playX >= 0 && playX <= w) {
+          ctx.strokeStyle = "rgba(239, 68, 68, 0.8)";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(playX, 0);
+          ctx.lineTo(playX, h);
+          ctx.stroke();
+        }
+      }
+
+      // Center line — amber when locked, red when playing, white when paused
+      const centerColor = isLocked
+        ? "rgba(245, 158, 11, 0.95)"
+        : isPlaying
+          ? "rgba(239, 68, 68, 0.95)"
+          : "rgba(255, 255, 255, 0.9)";
+      const shadowColor = isLocked
+        ? "rgba(245, 158, 11, 0.6)"
+        : isPlaying
+          ? "rgba(239, 68, 68, 0.6)"
+          : "rgba(255, 255, 255, 0.5)";
+      ctx.strokeStyle = centerColor;
       ctx.lineWidth = 2;
-      ctx.shadowColor = "rgba(255, 255, 255, 0.5)";
+      ctx.shadowColor = shadowColor;
       ctx.shadowBlur = 6;
       ctx.beginPath();
       ctx.moveTo(centerX, 0);
       ctx.lineTo(centerX, h);
       ctx.stroke();
       ctx.shadowBlur = 0;
+
+      // "LOCKED" indicator
+      if (isLocked) {
+        ctx.fillStyle = "rgba(245, 158, 11, 0.7)";
+        ctx.font = "bold 9px monospace";
+        ctx.fillText("LOCKED", 4, 10);
+      }
     },
-    [peaks, duration, beats, downbeatOffset, zoom]
+    [peaks, duration, beats, downbeatOffset, zoom, isPlaying, isLocked, cues]
   );
+
+  // Redraw helper
+  const redraw = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    draw(canvas, viewPosition.current, playbackPosition.current);
+  }, [draw]);
 
   // Resize
   useEffect(() => {
+    redraw();
     const canvas = canvasRef.current;
     if (!canvas) return;
-    draw(canvas, currentPosition.current);
-    const observer = new ResizeObserver(() => {
-      draw(canvas, currentPosition.current);
-    });
+    const observer = new ResizeObserver(redraw);
     observer.observe(canvas);
     return () => observer.disconnect();
-  }, [draw]);
+  }, [redraw]);
+
+  // Update view position when lock changes
+  useEffect(() => {
+    if (lockedPosition != null) {
+      viewPosition.current = lockedPosition;
+    } else {
+      // Unlocked — snap back to playback position
+      viewPosition.current = playbackPosition.current;
+    }
+    redraw();
+  }, [lockedPosition, redraw]);
 
   // Listen for playback ticks
   useEffect(() => {
     const handler = (e: Event) => {
-      const { trackId: tid, position } = (e as CustomEvent).detail;
+      const { trackId: tid, position, loopStart, loopEnd } = (e as CustomEvent).detail;
       if (tid !== trackId) return;
-      currentPosition.current = position;
+      playbackPosition.current = position;
+      loopRegion.current = (loopStart != null && loopEnd != null)
+        ? { start: loopStart, end: loopEnd }
+        : null;
+
+      // Only follow playback if not locked
+      if (!isLocked) {
+        viewPosition.current = position;
+      }
 
       if (!animFrameRef.current) {
         animFrameRef.current = requestAnimationFrame(() => {
           const canvas = canvasRef.current;
-          if (canvas) draw(canvas, currentPosition.current);
+          if (canvas) draw(canvas, viewPosition.current, playbackPosition.current);
           animFrameRef.current = 0;
         });
       }
@@ -174,40 +282,32 @@ export function ZoomedWaveform({ trackId, peaks, duration, beats, downbeatOffset
       window.removeEventListener("dj:playbackTick", handler);
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
     };
-  }, [trackId, draw]);
+  }, [trackId, draw, isLocked]);
 
-  // Mouse hover → show time + nearest beat; drag → scrub position
+  // Drag to scrub — works when paused OR locked
   const [hoverInfo, setHoverInfo] = useState<string | null>(null);
   const isDragging = useRef(false);
   const dragStartX = useRef(0);
   const dragStartPos = useRef(0);
 
-  const xToTime = useCallback(
-    (clientX: number, rect: DOMRect) => {
-      const relX = clientX - rect.left;
-      const halfWindow = zoom / 2;
-      const timeStart = currentPosition.current - halfWindow;
-      return timeStart + (relX / rect.width) * zoom;
-    },
-    [zoom]
-  );
+  const canDrag = !isPlaying || isLocked;
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (!canDrag) return;
       isDragging.current = true;
       dragStartX.current = e.clientX;
-      dragStartPos.current = currentPosition.current;
+      dragStartPos.current = viewPosition.current;
       e.currentTarget.style.cursor = "grabbing";
     },
-    []
+    [canDrag]
   );
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       const rect = e.currentTarget.getBoundingClientRect();
 
-      if (isDragging.current) {
-        // Drag: move position based on horizontal delta, snap to nearest beat
+      if (isDragging.current && canDrag) {
         const dx = e.clientX - dragStartX.current;
         const secondsPerPx = zoom / rect.width;
         let newPos = Math.max(0, Math.min(duration, dragStartPos.current - dx * secondsPerPx));
@@ -223,14 +323,23 @@ export function ZoomedWaveform({ trackId, peaks, duration, beats, downbeatOffset
           newPos = nearest;
         }
 
-        currentPosition.current = newPos;
-        window.djRpc?.request?.seek?.({ trackId, seconds: newPos });
+        viewPosition.current = newPos;
+
+        if (isLocked) {
+          onLockedPositionChange?.(newPos);
+        } else {
+          window.djRpc?.request?.seek?.({ trackId, seconds: newPos });
+        }
+
         const canvas = canvasRef.current;
-        if (canvas) draw(canvas, newPos);
+        if (canvas) draw(canvas, newPos, playbackPosition.current);
       }
 
       // Hover info
-      const hoverTime = xToTime(e.clientX, rect);
+      const relX = e.clientX - rect.left;
+      const halfWindow = zoom / 2;
+      const timeStart = viewPosition.current - halfWindow;
+      const hoverTime = timeStart + (relX / rect.width) * zoom;
       let nearestBeat = 0;
       let nearestIdx = -1;
       let minDist = Infinity;
@@ -240,33 +349,32 @@ export function ZoomedWaveform({ trackId, peaks, duration, beats, downbeatOffset
           if (d < minDist) { minDist = d; nearestBeat = beats[i] ?? 0; nearestIdx = i; }
         }
       }
-
       const beatNum = nearestIdx >= 0 ? `beat[${nearestIdx}]=${nearestBeat.toFixed(3)}s` : "no beats";
       const diff = nearestIdx >= 0 ? `Δ${((hoverTime - nearestBeat) * 1000).toFixed(0)}ms` : "";
-      setHoverInfo(`t=${hoverTime.toFixed(3)}s | ${beatNum} ${diff} | pos=${currentPosition.current.toFixed(3)}s`);
+      setHoverInfo(`t=${hoverTime.toFixed(3)}s | ${beatNum} ${diff}`);
     },
-    [zoom, beats, duration, trackId, draw, xToTime]
+    [zoom, beats, duration, trackId, draw, canDrag, isLocked, onLockedPositionChange]
   );
 
   const handleMouseUp = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       isDragging.current = false;
-      e.currentTarget.style.cursor = "grab";
+      e.currentTarget.style.cursor = canDrag ? "grab" : "default";
     },
-    []
+    [canDrag]
   );
 
   const handleMouseLeave = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     isDragging.current = false;
-    e.currentTarget.style.cursor = "grab";
+    e.currentTarget.style.cursor = canDrag ? "grab" : "default";
     setHoverInfo(null);
-  }, []);
+  }, [canDrag]);
 
   return (
     <div className="relative">
       <canvas
         ref={canvasRef}
-        className="w-full h-28 rounded-md bg-zinc-800/30 cursor-grab"
+        className={`w-full h-28 rounded-md bg-zinc-800/30 ${canDrag ? "cursor-grab" : ""}`}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
         onMouseUp={handleMouseUp}
