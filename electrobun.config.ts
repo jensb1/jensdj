@@ -21,7 +21,6 @@ export default {
     copy: {
       "src/mainview/index.html": "views/mainview/index.html",
       "src/mainview/compiled.css": "views/mainview/compiled.css",
-      "native/libdjengine.dylib": "../native/libdjengine.dylib",
     },
   },
 } satisfies ElectrobunConfig;

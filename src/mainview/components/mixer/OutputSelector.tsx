@@ -1,12 +1,13 @@
 import { useCallback } from "react";
 import { usePlayerStore } from "../../stores/playerStore.ts";
 
-interface OutputSelectorProps {
+export interface OutputSelectorProps {
   trackId: string;
   currentDeviceId: number;
+  compact?: boolean;
 }
 
-export function OutputSelector({ trackId, currentDeviceId }: OutputSelectorProps) {
+export function OutputSelector({ trackId, currentDeviceId, compact }: OutputSelectorProps) {
   const devices = usePlayerStore((s) => s.devices);
   const setDeviceId = usePlayerStore((s) => s.setDeviceId);
 
@@ -25,7 +26,10 @@ export function OutputSelector({ trackId, currentDeviceId }: OutputSelectorProps
     <select
       value={currentDeviceId}
       onChange={handleChange}
-      className="h-7 px-1.5 text-[10px] font-mono bg-zinc-800 text-zinc-400 border border-zinc-700 rounded cursor-pointer hover:border-zinc-600 focus:border-indigo-500 focus:outline-none truncate max-w-[120px]"
+      className={compact
+        ? "h-5 w-20 px-0.5 text-[8px] font-mono bg-zinc-700 text-zinc-400 border border-zinc-600 rounded cursor-pointer focus:outline-none truncate shrink-0"
+        : "h-7 px-1.5 text-[10px] font-mono bg-zinc-800 text-zinc-400 border border-zinc-700 rounded cursor-pointer hover:border-zinc-600 focus:border-indigo-500 focus:outline-none truncate max-w-[120px]"
+      }
     >
       <option value={-1}>Default</option>
       {devices.map((d) => (

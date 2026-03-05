@@ -24,7 +24,7 @@ import {
   djSetOriginalBpm,
   djScheduleSyncPlay,
   djCancelScheduledStart,
-  djGetPeaks,
+  djGetPeaks3Band,
   djDetectBpm,
   djDetectBeats,
 } from "./ffi.ts";
@@ -44,7 +44,7 @@ interface InternalTrack {
   metadata: TrackMetadata;
 }
 
-const NUM_PEAKS = 2000;
+const NUM_PEAKS = 50000;
 const MAX_BEATS = 4000;
 
 export class AudioEngine {
@@ -147,8 +147,8 @@ export class AudioEngine {
   }
 
   private analyze(filePath: string) {
-    const peaksBuf = djGetPeaks(filePath, NUM_PEAKS);
-    const peaks: number[] = peaksBuf ? Array.from(peaksBuf) : Array.from({ length: NUM_PEAKS }, () => 0);
+    const peaks3 = djGetPeaks3Band(filePath, NUM_PEAKS);
+    const peaks = peaks3 ?? { low: Array(NUM_PEAKS).fill(0), mid: Array(NUM_PEAKS).fill(0), high: Array(NUM_PEAKS).fill(0) };
     const bpm = djDetectBpm(filePath);
     const beatsBuf = djDetectBeats(filePath, MAX_BEATS);
     const beats = Array.from(beatsBuf);

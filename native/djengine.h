@@ -58,6 +58,12 @@ float dj_get_original_bpm(void* sound);
 // Returns 0 on success, non-zero on error.
 int dj_get_peaks(const char* filepath, float* out_peaks, int num_points);
 
+// 3-band waveform peaks (Rekordbox-style colored waveform)
+// Writes 3 * num_points floats: [low0,mid0,hi0, low1,mid1,hi1, ...]
+// Low: 0-250Hz (kick/bass), Mid: 250-4000Hz (vocals/synth), High: 4000Hz+ (hats/cymbals)
+// Returns 0 on success, non-zero on error.
+int dj_get_peaks_3band(const char* filepath, float* out_peaks, int num_points);
+
 // BPM detection (aubio)
 // Returns detected BPM, or 0 on error.
 float dj_detect_bpm(const char* filepath);

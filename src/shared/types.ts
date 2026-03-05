@@ -13,11 +13,17 @@ export interface TrackMetadata {
 }
 
 // Loaded track with analysis data
+export interface Peaks3Band {
+  low: number[];
+  mid: number[];
+  high: number[];
+}
+
 export interface LoadedTrack {
   id: string;
   filePath: string;
   metadata: TrackMetadata;
-  peaks: number[];
+  peaks: Peaks3Band;
   bpm: number;
   beats: number[];
   duration: number;
@@ -151,7 +157,7 @@ export type MainViewRPC = {
         trackId: string;
         bpm: number;
         beats: number[];
-        peaks: number[];
+        peaks: Peaks3Band;
       };
     };
   }>;

@@ -146,9 +146,16 @@ static ma_result stretched_get_data_format(ma_data_source* pDataSource, ma_forma
 
 static ma_result stretched_get_cursor(ma_data_source* pDataSource, ma_uint64* pCursor) {
     DJStretchedSource* src = (DJStretchedSource*)pDataSource;
-    // Adjust for Rubber Band's internal latency: read_cursor is ahead of actual output
+    // Compensate for all buffering between read_cursor and actual audio output:
+    // 1. Rubber Band processing latency (input frames consumed but not yet output)
+    // 2. Rubber Band buffered output (produced but not yet retrieved by us)
     unsigned int rb_latency = rubberband_get_latency(src->rb);
-    ma_uint64 adjusted = src->read_cursor > rb_latency ? src->read_cursor - rb_latency : 0;
+    int rb_available = rubberband_available(src->rb);
+    if (rb_available < 0) rb_available = 0;
+    // rb_available is in output frames; convert back to input frames
+    ma_uint64 rb_avail_input = (ma_uint64)((double)rb_available / src->time_ratio);
+    ma_uint64 total_offset = (ma_uint64)rb_latency + rb_avail_input;
+    ma_uint64 adjusted = src->read_cursor > total_offset ? src->read_cursor - total_offset : 0;
     if (pCursor) *pCursor = (ma_uint64)((double)adjusted * src->time_ratio);
     return MA_SUCCESS;
 }
@@ -569,22 +576,20 @@ int dj_get_peaks(const char* filepath, float* out_peaks, int num_points) {
         return -2;
     }
 
-    ma_uint64 frames_per_point = total_frames / (ma_uint64)num_points;
-    if (frames_per_point == 0) frames_per_point = 1;
+    double frames_per_point_f = (double)total_frames / (double)num_points;
 
     #define CHUNK_SIZE 4096
     float buffer[CHUNK_SIZE];
 
-    ma_uint64 frame_index = 0;
     int point_index = 0;
     float current_max = 0.0f;
-    ma_uint64 frames_in_current_point = 0;
+    ma_uint64 global_frame = 0;
+    double next_boundary = frames_per_point_f;
 
     while (point_index < num_points) {
-        ma_uint64 to_read = CHUNK_SIZE;
         ma_uint64 frames_read = 0;
 
-        if (ma_decoder_read_pcm_frames(&decoder, buffer, to_read, &frames_read) != MA_SUCCESS || frames_read == 0) {
+        if (ma_decoder_read_pcm_frames(&decoder, buffer, CHUNK_SIZE, &frames_read) != MA_SUCCESS || frames_read == 0) {
             break;
         }
 
@@ -592,16 +597,14 @@ int dj_get_peaks(const char* filepath, float* out_peaks, int num_points) {
             float val = fabsf(buffer[i]);
             if (val > current_max) current_max = val;
 
-            frames_in_current_point++;
-            if (frames_in_current_point >= frames_per_point) {
+            global_frame++;
+            if ((double)global_frame >= next_boundary) {
                 out_peaks[point_index] = current_max;
                 point_index++;
                 current_max = 0.0f;
-                frames_in_current_point = 0;
+                next_boundary = (double)(point_index + 1) * frames_per_point_f;
             }
         }
-
-        frame_index += frames_read;
     }
 
     while (point_index < num_points) {
@@ -614,23 +617,19 @@ int dj_get_peaks(const char* filepath, float* out_peaks, int num_points) {
     return 0;
 }
 
-// --- PCM transient detection (shared by BPM and beat detection) ---
+// --- Butterworth filter primitives (shared by 3-band peaks + transient detection) ---
 
-#define BEAT_SAMPLERATE 44100
-#define MAX_TRANSIENTS 500
-
-// 2nd-order Butterworth low-pass filter state
+// Low-pass filter (2nd order Butterworth)
 typedef struct {
     float x1, x2, y1, y2;
     float b0, b1, b2, a1, a2;
 } LPFilter;
 
 static void lp_init(LPFilter* f, float cutoff_hz, float samplerate) {
-    // 2nd-order Butterworth low-pass coefficients
     float w0 = 2.0f * (float)M_PI * cutoff_hz / samplerate;
     float cosw0 = cosf(w0);
     float sinw0 = sinf(w0);
-    float alpha = sinw0 / (2.0f * 0.7071f); // Q = 0.7071 for Butterworth
+    float alpha = sinw0 / (2.0f * 0.7071f);
     float a0 = 1.0f + alpha;
     f->b0 = ((1.0f - cosw0) / 2.0f) / a0;
     f->b1 = (1.0f - cosw0) / a0;
@@ -647,6 +646,113 @@ static float lp_process(LPFilter* f, float x) {
     f->y2 = f->y1; f->y1 = y;
     return y;
 }
+
+// High-pass filter (2nd order Butterworth)
+typedef struct {
+    float x1, x2, y1, y2;
+    float b0, b1, b2, a1, a2;
+} HPFilter;
+
+static void hp_init(HPFilter* f, float cutoff_hz, float samplerate) {
+    float w0 = 2.0f * (float)M_PI * cutoff_hz / samplerate;
+    float cosw0 = cosf(w0);
+    float sinw0 = sinf(w0);
+    float alpha = sinw0 / (2.0f * 0.7071f);
+    float a0 = 1.0f + alpha;
+    f->b0 = ((1.0f + cosw0) / 2.0f) / a0;
+    f->b1 = -(1.0f + cosw0) / a0;
+    f->b2 = f->b0;
+    f->a1 = (-2.0f * cosw0) / a0;
+    f->a2 = (1.0f - alpha) / a0;
+    f->x1 = f->x2 = f->y1 = f->y2 = 0.0f;
+}
+
+static float hp_process(HPFilter* f, float x) {
+    float y = f->b0 * x + f->b1 * f->x1 + f->b2 * f->x2
+            - f->a1 * f->y1 - f->a2 * f->y2;
+    f->x2 = f->x1; f->x1 = x;
+    f->y2 = f->y1; f->y1 = y;
+    return y;
+}
+
+int dj_get_peaks_3band(const char* filepath, float* out_peaks, int num_points) {
+    if (!filepath || !out_peaks || num_points <= 0) return -1;
+
+    ma_decoder decoder;
+    ma_decoder_config config = ma_decoder_config_init(ma_format_f32, 1, 44100);
+    if (ma_decoder_init_file(filepath, &config, &decoder) != MA_SUCCESS) return -1;
+
+    ma_uint64 total_frames = 0;
+    ma_decoder_get_length_in_pcm_frames(&decoder, &total_frames);
+    if (total_frames == 0) { ma_decoder_uninit(&decoder); return -2; }
+
+    // Use floating-point boundary tracking to avoid cumulative rounding error
+    double frames_per_point = (double)total_frames / (double)num_points;
+
+    // Low-pass at 250Hz (kick/bass)
+    LPFilter lp1, lp2;
+    lp_init(&lp1, 250.0f, 44100.0f);
+    lp_init(&lp2, 250.0f, 44100.0f);
+
+    // High-pass at 4000Hz (hats/cymbals)
+    HPFilter hp1, hp2;
+    hp_init(&hp1, 4000.0f, 44100.0f);
+    hp_init(&hp2, 4000.0f, 44100.0f);
+
+    #define PEAK3_CHUNK 4096
+    float buffer[PEAK3_CHUNK];
+    int point_index = 0;
+    float max_lo = 0.0f, max_mid = 0.0f, max_hi = 0.0f;
+    ma_uint64 global_frame = 0;
+    double next_boundary = frames_per_point; // when to emit next peak
+
+    while (point_index < num_points) {
+        ma_uint64 frames_read = 0;
+        if (ma_decoder_read_pcm_frames(&decoder, buffer, PEAK3_CHUNK, &frames_read) != MA_SUCCESS || frames_read == 0)
+            break;
+
+        for (ma_uint64 i = 0; i < frames_read && point_index < num_points; i++) {
+            float sample = buffer[i];
+            float lo = lp_process(&lp2, lp_process(&lp1, sample));
+            float hi = hp_process(&hp2, hp_process(&hp1, sample));
+            float mid = sample - lo - hi;
+
+            float abs_lo = fabsf(lo);
+            float abs_mid = fabsf(mid);
+            float abs_hi = fabsf(hi);
+
+            if (abs_lo > max_lo) max_lo = abs_lo;
+            if (abs_mid > max_mid) max_mid = abs_mid;
+            if (abs_hi > max_hi) max_hi = abs_hi;
+
+            global_frame++;
+            if ((double)global_frame >= next_boundary) {
+                out_peaks[point_index * 3 + 0] = max_lo;
+                out_peaks[point_index * 3 + 1] = max_mid;
+                out_peaks[point_index * 3 + 2] = max_hi;
+                point_index++;
+                max_lo = max_mid = max_hi = 0.0f;
+                next_boundary = (double)(point_index + 1) * frames_per_point;
+            }
+        }
+    }
+
+    while (point_index < num_points) {
+        out_peaks[point_index * 3 + 0] = max_lo;
+        out_peaks[point_index * 3 + 1] = max_mid;
+        out_peaks[point_index * 3 + 2] = max_hi;
+        point_index++;
+        max_lo = max_mid = max_hi = 0.0f;
+    }
+
+    ma_decoder_uninit(&decoder);
+    return 0;
+}
+
+// --- PCM transient detection (shared by BPM and beat detection) ---
+
+#define BEAT_SAMPLERATE 44100
+#define MAX_TRANSIENTS 500
 
 // Find first N transients in mono PCM via low-pass filtered envelope follower.
 // Low-pass at 200Hz isolates kick drum before transient detection.
@@ -735,7 +841,13 @@ float dj_detect_bpm(const char* filepath) {
                     if (intervals[j] < intervals[i]) {
                         float tmp = intervals[i]; intervals[i] = intervals[j]; intervals[j] = tmp;
                     }
-            return 60.0f / intervals[n_intervals / 2];
+            // Refine: mean of intervals within 1ms of median
+            float med = intervals[n_intervals / 2];
+            double csum = 0; int ccount = 0;
+            for (int i = 0; i < n_intervals; i++) {
+                if (fabsf(intervals[i] - med) < 0.001f) { csum += intervals[i]; ccount++; }
+            }
+            return 60.0f / (ccount > 0 ? (float)(csum / ccount) : med);
         }
     }
 
@@ -768,7 +880,25 @@ float dj_detect_bpm(const char* filepath) {
 }
 
 // --- Beat detection ---
-// Decode to PCM, find transients, compute BPM from intervals, generate grid.
+// 1. Get rough BPM from transients
+// 2. Pre-filter PCM to low band (matches waveform display)
+// 3. Fine-scan BPM + phase by maximizing on-beat energy across entire track
+// 4. Generate grid
+
+// Helper: compute total energy at beat positions for a given interval + phase
+static double beat_energy(const float* energy, int n_energy, double duration,
+                          double interval, double phase) {
+    double sum = 0;
+    int window = 3; // +/- 3 energy bins (~12ms at 2ms resolution)
+    for (double t = phase; t < duration; t += interval) {
+        int idx = (int)((t / duration) * n_energy);
+        for (int j = -window; j <= window; j++) {
+            int k = idx + j;
+            if (k >= 0 && k < n_energy) sum += energy[k];
+        }
+    }
+    return sum;
+}
 
 int dj_detect_beats(const char* filepath, float* out_beats, int max_beats) {
     if (!filepath || !out_beats || max_beats <= 0) return 0;
@@ -793,49 +923,185 @@ int dj_detect_beats(const char* filepath, float* out_beats, int max_beats) {
 
     if (frames_read == 0) { free(pcm); return 0; }
 
-    // Find transients in PCM
+    // --- Step 1: Get rough BPM from transients ---
     float transients[MAX_TRANSIENTS];
     int n_trans = find_pcm_transients(pcm, frames_read, transients, MAX_TRANSIENTS);
-    free(pcm);
 
-    if (n_trans < 2) return 0;
-
-    // Compute BPM from median interval between consecutive transients
-    float intervals[MAX_TRANSIENTS];
-    int n_intervals = 0;
-    for (int i = 1; i < n_trans; i++) {
-        float interval = transients[i] - transients[i - 1];
-        // Filter: only keep intervals in plausible beat range (60-200 BPM → 300-1000ms)
-        if (interval >= 0.3f && interval <= 1.0f) {
-            intervals[n_intervals++] = interval;
+    float rough_bpm = 0;
+    if (n_trans >= 3) {
+        float intervals[MAX_TRANSIENTS];
+        int n_iv = 0;
+        for (int i = 1; i < n_trans; i++) {
+            float iv = transients[i] - transients[i-1];
+            if (iv >= 0.3f && iv <= 1.0f) intervals[n_iv++] = iv;
+        }
+        if (n_iv >= 2) {
+            // Sort and take median
+            for (int i = 0; i < n_iv-1; i++)
+                for (int j = i+1; j < n_iv; j++)
+                    if (intervals[j] < intervals[i]) {
+                        float tmp = intervals[i]; intervals[i] = intervals[j]; intervals[j] = tmp;
+                    }
+            rough_bpm = 60.0f / intervals[n_iv / 2];
         }
     }
+    if (rough_bpm <= 0) { free(pcm); return 0; }
 
-    if (n_intervals == 0) return 0;
+    // --- Step 2: Build onset strength array ---
+    // LP filter, compute energy per window, then take positive derivative (rise = onset)
+    LPFilter el1, el2;
+    lp_init(&el1, 250.0f, (float)BEAT_SAMPLERATE);
+    lp_init(&el2, 250.0f, (float)BEAT_SAMPLERATE);
 
-    // Sort to find median
-    for (int i = 0; i < n_intervals - 1; i++) {
-        for (int j = i + 1; j < n_intervals; j++) {
-            if (intervals[j] < intervals[i]) {
-                float tmp = intervals[i];
-                intervals[i] = intervals[j];
-                intervals[j] = tmp;
+    int energy_window = BEAT_SAMPLERATE / 500; // ~2ms windows
+    int n_energy = (int)(frames_read / energy_window);
+    if (n_energy < 10) { free(pcm); return 0; }
+
+    float* raw_energy = (float*)calloc(n_energy, sizeof(float));
+    float* energy = (float*)calloc(n_energy, sizeof(float));
+    if (!raw_energy || !energy) { free(pcm); free(raw_energy); free(energy); return 0; }
+
+    for (ma_uint64 i = 0; i < frames_read; i++) {
+        float filtered = lp_process(&el2, lp_process(&el1, pcm[i]));
+        int bin = (int)(i / energy_window);
+        if (bin < n_energy) raw_energy[bin] += filtered * filtered;
+    }
+    free(pcm);
+
+    // Onset strength = positive half-wave rectified derivative of energy
+    // Used for BPM detection (emphasizes kick transients)
+    energy[0] = 0;
+    for (int i = 1; i < n_energy; i++) {
+        float diff = raw_energy[i] - raw_energy[i-1];
+        energy[i] = diff > 0 ? diff : 0;
+    }
+    // raw_energy kept for phase alignment (matches waveform display)
+
+    // --- Step 3: Two-pass BPM + phase scan ---
+    // Pass 1: Coarse scan ±2 BPM in 0.1 steps
+    double best_interval = 60.0 / rough_bpm;
+    double best_phase = 0;
+    double best_score = 0;
+
+    for (double bpm_try = rough_bpm - 2.0; bpm_try <= rough_bpm + 2.0; bpm_try += 0.05) {
+        if (bpm_try <= 0) continue;
+        double iv = 60.0 / bpm_try;
+        int phase_steps = (int)(iv * 500); // 2ms steps
+        for (int p = 0; p < phase_steps; p++) {
+            double ph = p * 0.002;
+            double score = beat_energy(energy, n_energy, duration, iv, ph);
+            if (score > best_score) {
+                best_score = score;
+                best_interval = iv;
+                best_phase = ph;
             }
         }
     }
-    float median_interval = intervals[n_intervals / 2];
-    float bpm = 60.0f / median_interval;
-    float beat_interval = median_interval;
 
-    // Phase = first transient position
-    float phase = transients[0];
+    // Pass 2: Fine BPM scan using onset strength
+    double coarse_bpm = 60.0 / best_interval;
+    double coarse_phase = best_phase;
+    best_score = 0;
 
-    // Generate perfect grid from phase + BPM
+    for (double bpm_try = coarse_bpm - 0.5; bpm_try <= coarse_bpm + 0.5; bpm_try += 0.001) {
+        if (bpm_try <= 0) continue;
+        double iv = 60.0 / bpm_try;
+        for (int p = -10; p <= 10; p++) {
+            double ph = coarse_phase + p * 0.0005;
+            if (ph < 0) ph += iv;
+            if (ph >= iv) ph -= iv;
+            double score = beat_energy(energy, n_energy, duration, iv, ph);
+            if (score > best_score) {
+                best_score = score;
+                best_interval = iv;
+                best_phase = ph;
+            }
+        }
+    }
+
+    free(energy);
+
+    free(raw_energy);
+
+    // Pass 3: Sample-level drift correction (iterated).
+    // Re-decode, LP filter, find exact peak sample near each beat, regress to correct interval.
+    // Run 3 iterations to converge.
+    {
+        ma_decoder dec3;
+        ma_decoder_config dc3 = ma_decoder_config_init(ma_format_f32, 1, BEAT_SAMPLERATE);
+        if (ma_decoder_init_file(filepath, &dc3, &dec3) == MA_SUCCESS) {
+            ma_uint64 tf3 = 0;
+            ma_decoder_get_length_in_pcm_frames(&dec3, &tf3);
+            float* pcm3 = (float*)malloc(tf3 * sizeof(float));
+            if (pcm3) {
+                ma_uint64 fr3 = 0;
+                ma_decoder_read_pcm_frames(&dec3, pcm3, tf3, &fr3);
+
+                // LP filter to match peak display (250Hz, 4th order)
+                LPFilter dl1, dl2;
+                lp_init(&dl1, 250.0f, (float)BEAT_SAMPLERATE);
+                lp_init(&dl2, 250.0f, (float)BEAT_SAMPLERATE);
+                for (ma_uint64 i = 0; i < fr3; i++) {
+                    pcm3[i] = lp_process(&dl2, lp_process(&dl1, pcm3[i]));
+                }
+
+                float global_max = 0;
+                for (ma_uint64 i = 0; i < fr3; i++) {
+                    float v = fabsf(pcm3[i]);
+                    if (v > global_max) global_max = v;
+                }
+                float thresh = global_max * 0.3f;
+
+                // Iterate 3 times to converge
+                for (int iter = 0; iter < 3; iter++) {
+                    int search_samples = BEAT_SAMPLERATE / 10; // ±100ms
+                    double sx3 = 0, sy3 = 0, sxy3 = 0, sx3_2 = 0;
+                    int n3 = 0;
+
+                    int beat_idx = 0;
+                    for (double t = best_phase; t < duration; t += best_interval) {
+                        ma_uint64 center = (ma_uint64)(t * BEAT_SAMPLERATE);
+                        float peak_val = 0;
+                        int peak_off = 0;
+                        for (int j = -search_samples; j <= search_samples; j++) {
+                            ma_uint64 k = center + j;
+                            if (k < fr3) {
+                                float v = fabsf(pcm3[k]);
+                                if (v > peak_val) { peak_val = v; peak_off = j; }
+                            }
+                        }
+                        if (peak_val > thresh) {
+                            double x = (double)beat_idx;
+                            double y = (double)peak_off / (double)BEAT_SAMPLERATE;
+                            sx3 += x; sy3 += y; sxy3 += x * y; sx3_2 += x * x;
+                            n3++;
+                        }
+                        beat_idx++;
+                    }
+
+                    if (n3 >= 20) {
+                        double nd = (double)n3;
+                        double drift = (nd * sxy3 - sx3 * sy3) / (nd * sx3_2 - sx3 * sx3);
+                        double intercept = (sy3 - drift * sx3) / nd;
+                        best_interval += drift;
+                        best_phase += intercept;
+                        while (best_phase < 0) best_phase += best_interval;
+                        while (best_phase >= best_interval) best_phase -= best_interval;
+                    }
+                }
+
+                free(pcm3);
+            }
+            ma_decoder_uninit(&dec3);
+        }
+    }
+
+    // --- Step 4: Generate grid ---
     int beat_count = 0;
-    float t = phase;
+    double t = best_phase;
     while (t < duration && beat_count < max_beats) {
-        out_beats[beat_count++] = t;
-        t += beat_interval;
+        out_beats[beat_count++] = (float)t;
+        t += best_interval;
     }
 
     return beat_count;

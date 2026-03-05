@@ -91,6 +91,12 @@ export function createRPC() {
 
         seek: ({ trackId, seconds }) => {
           engine.seek(trackId, seconds);
+          // Send immediate position update so waveform updates even when paused
+          webviewRef?.rpc?.send?.playbackTick?.({
+            trackId,
+            position: engine.getPosition(trackId),
+            level: 0,
+          });
         },
 
         setVolume: ({ trackId, volume }) => {

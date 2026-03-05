@@ -3,11 +3,10 @@ import { usePlayerStore } from "../../stores/playerStore.ts";
 import { PlaybackControls } from "./PlaybackControls.tsx";
 import { Waveform } from "./Waveform.tsx";
 import { ZoomedWaveform } from "./ZoomedWaveform.tsx";
-import { Slider } from "../ui/slider.tsx";
 import { Button } from "../ui/button.tsx";
-import { OutputSelector } from "../mixer/OutputSelector.tsx";
 import { EQControls } from "../mixer/EQControls.tsx";
-import { LevelMeter } from "../mixer/LevelMeter.tsx";
+import { OutputSelector } from "../mixer/OutputSelector.tsx";
+import type { Peaks3Band } from "../../../shared/types.ts";
 
 interface TrackRowProps {
   trackId: string;
@@ -15,7 +14,7 @@ interface TrackRowProps {
     track: {
       metadata: { title: string; artist: string; bpm: number };
       duration: number;
-      peaks: number[];
+      peaks: Peaks3Band;
       beats: number[];
     };
     position: number;
@@ -24,6 +23,55 @@ interface TrackRowProps {
     deviceId: number;
   };
   onWaveformRef?: (el: HTMLDivElement | null) => void;
+}
+
+function VolumeFader({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  const svgRef = useRef<SVGSVGElement>(null);
+
+  const getVolFromY = useCallback((clientY: number) => {
+    const svg = svgRef.current;
+    if (!svg) return value;
+    const rect = svg.getBoundingClientRect();
+    const pct = 1 - (clientY - rect.top) / rect.height;
+    return Math.max(0, Math.min(1, pct));
+  }, [value]);
+
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    onChange(getVolFromY(e.clientY));
+    const onMove = (ev: MouseEvent) => onChange(getVolFromY(ev.clientY));
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [onChange, getVolFromY]);
+
+  const h = 90;
+  const w = 16;
+  const trackX = w / 2;
+  const fillH = value * h;
+  const thumbY = h - fillH;
+
+  return (
+    <svg
+      ref={svgRef}
+      width={w}
+      height={h}
+      className="cursor-ns-resize select-none"
+      onMouseDown={handleMouseDown}
+    >
+      {/* Track */}
+      <rect x={trackX - 2} y={0} width={4} height={h} rx={2} fill="#3f3f46" />
+      {/* Fill */}
+      <rect x={trackX - 2} y={h - fillH} width={4} height={fillH} rx={2} fill="#3b82f6" />
+      {/* Thumb */}
+      <rect x={trackX - 6} y={thumbY - 4} width={12} height={8} rx={2} fill="#d4d4d8" stroke="#a1a1aa" strokeWidth={0.5} />
+      {/* Center line on thumb */}
+      <line x1={trackX - 3} y1={thumbY} x2={trackX + 3} y2={thumbY} stroke="#71717a" strokeWidth={0.5} />
+    </svg>
+  );
 }
 
 function formatTime(seconds: number): string {
@@ -57,15 +105,6 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
     await window.djRpc?.request?.unloadTrack?.({ trackId });
     removeTrack(trackId);
   }, [trackId, removeTrack]);
-
-  const handleVolumeChange = useCallback(
-    (value: number[]) => {
-      const vol = value[0] ?? 1;
-      usePlayerStore.getState().setVolume(trackId, vol);
-      window.djRpc?.request?.setVolume?.({ trackId, volume: vol });
-    },
-    [trackId]
-  );
 
   const handleSeek = useCallback(
     (seconds: number) => {
@@ -102,32 +141,50 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
 
   return (
     <div className="border-b border-zinc-800/50 bg-zinc-900/30 hover:bg-zinc-900/60 transition-colors">
-      {/* Zoomed waveform — scrolls with playhead centered */}
-      <div className="px-4 pt-2">
-        <ZoomedWaveform
-          trackId={trackId}
-          peaks={state.track.peaks}
-          duration={state.track.duration}
-          beats={displayBeats}
-          downbeatOffset={downbeatOffset}
-          zoom={10}
-        />
+      {/* Top row: mixer square + zoomed waveform */}
+      <div className="flex px-4 pt-2 gap-2">
+        {/* Mixer square: EQ knobs + volume fader */}
+        <div className="shrink-0 flex gap-1.5 bg-zinc-800/50 rounded-md px-1.5 py-1 h-28 items-center">
+          <EQControls trackId={trackId} layout="vertical" />
+          {/* Volume fader — custom slim track */}
+          <VolumeFader
+            value={state.volume}
+            onChange={(vol) => {
+              usePlayerStore.getState().setVolume(trackId, vol);
+              window.djRpc?.request?.setVolume?.({ trackId, volume: vol });
+            }}
+          />
+        </div>
+
+        {/* Zoomed waveform */}
+        <div className="flex-1">
+          <ZoomedWaveform
+            trackId={trackId}
+            peaks={state.track.peaks}
+            duration={state.track.duration}
+            beats={displayBeats}
+            downbeatOffset={downbeatOffset}
+            zoom={10}
+          />
+        </div>
       </div>
-      <div className="flex items-center gap-3 px-4 py-2">
+
+      {/* Bottom row: controls + overview waveform + output + close */}
+      <div className="flex items-center gap-2 px-4 py-1">
         <PlaybackControls trackId={trackId} isPlaying={state.isPlaying} />
 
         {/* Track info */}
-        <div className="w-44 shrink-0 min-w-0">
-          <div className="text-sm font-medium text-zinc-100 truncate">
+        <div className="w-32 shrink-0 min-w-0">
+          <div className="text-[11px] font-medium text-zinc-100 truncate">
             {state.track.metadata.title}
           </div>
-          <div className="text-[11px] text-zinc-500 truncate">
+          <div className="text-[9px] text-zinc-500 truncate">
             {state.track.metadata.artist}
           </div>
         </div>
 
         {/* BPM + downbeat */}
-        <div className="w-20 shrink-0 text-center flex flex-col items-center gap-0.5">
+        <div className="shrink-0 flex items-center gap-1">
           {editingBpm ? (
             <input
               type="text"
@@ -139,11 +196,11 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
                 if (e.key === "Escape") setEditingBpm(false);
               }}
               autoFocus
-              className="w-14 h-5 text-[11px] font-mono font-bold text-center bg-zinc-700 text-amber-300 border border-amber-500/50 rounded outline-none px-1"
+              className="w-12 h-4 text-[10px] font-mono font-bold text-center bg-zinc-700 text-amber-300 border border-amber-500/50 rounded outline-none"
             />
           ) : (
             <span
-              className="text-[11px] font-mono font-bold px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 cursor-pointer hover:bg-amber-500/20 transition-colors"
+              className="text-[10px] font-mono font-bold px-1 py-0.5 rounded bg-amber-500/10 text-amber-400 cursor-pointer hover:bg-amber-500/20"
               onClick={() => {
                 setBpmValue(displayBpm > 0 ? displayBpm.toFixed(1) : "");
                 setEditingBpm(true);
@@ -154,15 +211,15 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
             </span>
           )}
           <span
-            className="text-[9px] font-mono px-1 py-0.5 rounded bg-zinc-800 text-zinc-500 cursor-pointer hover:text-amber-400 hover:bg-zinc-700 transition-colors"
+            className="text-[8px] font-mono px-0.5 rounded bg-zinc-800 text-zinc-500 cursor-pointer hover:text-amber-400"
             onClick={() => setDownbeatOffset((downbeatOffset + 1) % 4)}
-            title={`Downbeat offset: ${downbeatOffset + 1}/4 — click to shift`}
+            title="Click to shift downbeat"
           >
             1:{downbeatOffset + 1}
           </span>
         </div>
 
-        {/* Canvas waveform with beat grid */}
+        {/* Overview waveform */}
         <Waveform
           trackId={trackId}
           peaks={state.track.peaks}
@@ -173,38 +230,18 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
           onContainerRef={onWaveformRef}
         />
 
-        {/* Time display */}
-        <div className="w-24 shrink-0 text-center">
-          <span ref={timeRef} className="font-mono text-xs text-zinc-400">
-            {formatTime(state.position)}
-          </span>
-          <span className="text-zinc-700 mx-0.5">/</span>
-          <span className="font-mono text-[11px] text-zinc-600">
-            {formatTime(state.track.duration)}
-          </span>
-        </div>
+        {/* Time */}
+        <span ref={timeRef} className="font-mono text-[10px] text-zinc-400 shrink-0">
+          {formatTime(state.position)}
+        </span>
+        <span className="font-mono text-[9px] text-zinc-600 shrink-0">
+          {formatTime(state.track.duration)}
+        </span>
 
-        {/* EQ */}
-        <EQControls trackId={trackId} />
+        {/* Output selector */}
+        <OutputSelector trackId={trackId} currentDeviceId={state.deviceId} compact />
 
-        {/* Level meter */}
-        <LevelMeter trackId={trackId} />
-
-        {/* Output device */}
-        <OutputSelector trackId={trackId} currentDeviceId={state.deviceId} />
-
-        {/* Volume */}
-        <div className="w-20 shrink-0">
-          <Slider
-            value={[state.volume]}
-            min={0}
-            max={1}
-            step={0.01}
-            onValueChange={handleVolumeChange}
-          />
-        </div>
-
-        <Button variant="ghost" size="icon" onClick={handleRemove} className="text-zinc-600 hover:text-red-400">
+        <Button variant="ghost" size="icon" onClick={handleRemove} className="text-zinc-600 hover:text-red-400 h-5 w-5 shrink-0">
           ✕
         </Button>
       </div>

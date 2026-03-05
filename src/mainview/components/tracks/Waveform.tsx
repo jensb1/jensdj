@@ -1,10 +1,9 @@
 import { useRef, useEffect, useCallback } from "react";
-import { useBeatDragStore } from "../../stores/beatDragStore.ts";
-import { useConnectionStore } from "../../stores/connectionStore.ts";
+import type { Peaks3Band } from "../../../shared/types.ts";
 
 interface WaveformProps {
   trackId: string;
-  peaks: number[];
+  peaks: Peaks3Band;
   duration: number;
   beats?: number[];
   downbeatOffset?: number;
@@ -12,39 +11,12 @@ interface WaveformProps {
   onContainerRef?: (el: HTMLDivElement | null) => void;
 }
 
-const BEAT_SNAP_PX = 8; // pixels proximity to snap to a beat
-
 export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, onSeek, onContainerRef }: WaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const playheadPct = useRef(0);
   const animFrameRef = useRef<number>(0);
-  const isDraggingBeat = useRef(false);
-
-  // Find nearest BAR beat (every 4th beat = "1" beat) to an x position
-  const findNearestBarBeat = useCallback(
-    (clientX: number): number | null => {
-      if (!beats || beats.length === 0 || !containerRef.current || duration <= 0) return null;
-      const rect = containerRef.current.getBoundingClientRect();
-      const relX = clientX - rect.left;
-      const w = rect.width;
-
-      let closest: number | null = null;
-      let minDist = BEAT_SNAP_PX;
-      for (let i = downbeatOffset; i < beats.length; i += 4) {
-        const beatTime = beats[i] ?? 0;
-        const beatX = (beatTime / duration) * w;
-        const dist = Math.abs(beatX - relX);
-        if (dist < minDist) {
-          minDist = dist;
-          closest = beatTime;
-        }
-      }
-      return closest;
-    },
-    [beats, duration]
-  );
 
   // Draw the static waveform + beat grid
   const drawStatic = useCallback((canvas: HTMLCanvasElement) => {
@@ -59,37 +31,61 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
 
     const w = rect.width;
     const h = rect.height;
-    const mid = h / 2;
 
     ctx.clearRect(0, 0, w, h);
 
-    // Draw beat grid lines (behind waveform)
-    if (beats && beats.length > 0 && duration > 0) {
-      ctx.save();
-      for (let i = 0; i < beats.length; i++) {
-        const x = ((beats[i] ?? 0) / duration) * w;
-        const isBar = (i - downbeatOffset + 400) % 4 === 0; // +400 to keep modulo positive
-        ctx.strokeStyle = isBar ? "rgba(251, 191, 36, 0.25)" : "rgba(251, 191, 36, 0.10)";
-        ctx.lineWidth = isBar ? 1.5 : 0.5;
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, h);
-        ctx.stroke();
-      }
-      ctx.restore();
-    }
+    // Draw 3-band stacked waveform (Rekordbox-style, half-height from bottom)
+    // Each band normalized independently for visual balance
+    const numPoints = peaks.low.length;
+    if (numPoints === 0) return;
+    const barWidth = w / numPoints;
+    const bw = Math.max(barWidth - 0.5, 0.5);
 
-    // Draw waveform bars
-    if (peaks.length === 0) return;
-    const barWidth = w / peaks.length;
-    for (let i = 0; i < peaks.length; i++) {
-      const peak = peaks[i] ?? 0;
-      const barH = Math.max(1, peak * (h * 0.85));
-      const x = i * barWidth;
-      ctx.fillStyle = "rgba(161, 161, 170, 0.45)";
-      ctx.fillRect(x, mid - barH / 2, Math.max(barWidth - 0.5, 0.5), barH);
+    // Per-band normalization
+    let maxLo = 0, maxMi = 0, maxHi = 0;
+    for (let i = 0; i < numPoints; i++) {
+      if ((peaks.low[i] ?? 0) > maxLo) maxLo = peaks.low[i]!;
+      if ((peaks.mid[i] ?? 0) > maxMi) maxMi = peaks.mid[i]!;
+      if ((peaks.high[i] ?? 0) > maxHi) maxHi = peaks.high[i]!;
     }
-  }, [peaks, beats, duration, downbeatOffset]);
+    if (maxLo < 0.01) maxLo = 1;
+    if (maxMi < 0.01) maxMi = 1;
+    if (maxHi < 0.01) maxHi = 1;
+
+    const scale = h * 0.9;
+    const baseline = h;
+
+    for (let i = 0; i < numPoints; i++) {
+      const lo = (peaks.low[i] ?? 0) / maxLo;
+      const mi = (peaks.mid[i] ?? 0) / maxMi;
+      const hi = (peaks.high[i] ?? 0) / maxHi;
+      const total = Math.max(lo, mi, hi);
+      if (total < 0.01) continue;
+      const x = i * barWidth;
+
+      // Draw blue at full height, orange on top, white on top
+      // Visual result: blue at outer edges, orange in middle, white at base
+      const barH = total * scale;
+
+      // Blue (low) — drawn first at full bar height
+      ctx.fillStyle = "#2563ff";
+      ctx.fillRect(x, baseline - barH, bw, barH);
+
+      // Orange (mid) — height proportional to mid, paints over blue
+      const miH = Math.max(mi, hi) * scale;
+      if (miH > 0.5) {
+        ctx.fillStyle = "#ff9500";
+        ctx.fillRect(x, baseline - miH, bw, miH);
+      }
+
+      // White (high) — height proportional to high only
+      const hiH = hi * scale;
+      if (hiH > 0.5) {
+        ctx.fillStyle = "#e8e8ff";
+        ctx.fillRect(x, baseline - hiH, bw, hiH);
+      }
+    }
+  }, [peaks, duration]);
 
   // Draw the dynamic overlay (played region + playhead)
   const drawOverlay = useCallback((canvas: HTMLCanvasElement, pct: number) => {
@@ -170,71 +166,48 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
     };
   }, [trackId, duration, drawOverlay]);
 
-  // Mouse handlers for beat dragging + click-to-seek
+  // Drag-to-scrub
+  const isDragging = useRef(false);
+
+  const seekFromX = useCallback(
+    (clientX: number) => {
+      const el = containerRef.current;
+      if (!el || duration <= 0) return;
+      const rect = el.getBoundingClientRect();
+      const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      let time = pct * duration;
+
+      // Snap to nearest downbeat (beat "1")
+      if (beats && beats.length > 0) {
+        let nearest = beats[0] ?? 0;
+        let minDist = Infinity;
+        for (let i = downbeatOffset; i < beats.length; i += 4) {
+          const d = Math.abs((beats[i] ?? 0) - time);
+          if (d < minDist) { minDist = d; nearest = beats[i] ?? 0; }
+        }
+        time = nearest;
+      }
+
+      onSeek(time);
+    },
+    [duration, onSeek, beats, downbeatOffset]
+  );
+
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLDivElement>) => {
-      const beatTime = findNearestBarBeat(e.clientX);
-      if (beatTime !== null) {
-        isDraggingBeat.current = true;
-        const rect = containerRef.current!.getBoundingClientRect();
-        const beatX = rect.left + (beatTime / duration) * rect.width;
-        const beatY = rect.top + rect.height / 2;
-        useBeatDragStore.getState().startDrag({
-          sourceTrackId: trackId,
-          sourceBeatTime: beatTime,
-          startX: beatX,
-          startY: beatY,
-        });
-        e.preventDefault();
-      }
+      e.preventDefault();
+      isDragging.current = true;
+      seekFromX(e.clientX);
+      const onMove = (ev: MouseEvent) => { if (isDragging.current) seekFromX(ev.clientX); };
+      const onUp = () => {
+        isDragging.current = false;
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
     },
-    [trackId, duration, findNearestBarBeat]
-  );
-
-  const handleMouseUp = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
-      if (isDraggingBeat.current) {
-        isDraggingBeat.current = false;
-        // Check if we dropped on this waveform's beat
-        const drag = useBeatDragStore.getState().endDrag();
-        if (drag && drag.sourceTrackId !== trackId) {
-          const targetBeat = findNearestBarBeat(e.clientX);
-          if (targetBeat !== null) {
-            useConnectionStore.getState().addConnection({
-              sourceTrackId: drag.sourceTrackId,
-              sourceBeatTime: drag.sourceBeatTime,
-              targetTrackId: trackId,
-              targetBeatTime: targetBeat,
-            });
-          }
-        }
-        return;
-      }
-      // Normal click-to-seek
-      const rect = e.currentTarget.getBoundingClientRect();
-      const pct = (e.clientX - rect.left) / rect.width;
-      onSeek(pct * duration);
-    },
-    [trackId, duration, onSeek, findNearestBarBeat]
-  );
-
-  // Cursor changes near beats
-  const handleMouseMove = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
-      const container = containerRef.current;
-      if (!container) return;
-
-      // Update drag position globally
-      const drag = useBeatDragStore.getState().drag;
-      if (drag) {
-        useBeatDragStore.getState().updateDrag(e.clientX, e.clientY);
-        return;
-      }
-
-      const nearBeat = findNearestBarBeat(e.clientX);
-      container.style.cursor = nearBeat !== null ? "grab" : "pointer";
-    },
-    [findNearestBarBeat]
+    [seekFromX]
   );
 
   return (
@@ -243,14 +216,12 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
         (containerRef as React.MutableRefObject<HTMLDivElement | null>).current = el;
         onContainerRef?.(el);
       }}
-      className="relative flex-1 h-14 bg-zinc-800/40 rounded-md overflow-hidden cursor-pointer"
+      className="relative flex-1 h-7 bg-zinc-800/40 rounded-md overflow-hidden cursor-pointer"
       onMouseDown={handleMouseDown}
-      onMouseUp={handleMouseUp}
-      onMouseMove={handleMouseMove}
     >
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
       <canvas ref={overlayRef} className="absolute inset-0 w-full h-full" />
-      {peaks.length === 0 && (
+      {peaks.low.length === 0 && (
         <span className="absolute inset-0 flex items-center justify-center text-[10px] text-zinc-600">
           No waveform data
         </span>

@@ -4,13 +4,17 @@ import { resolve, dirname } from "path";
 // In dev: import.meta.dir is src/bun/audio/, dylib is at native/
 // In bundled app: the dylib should be alongside the app bundle
 // We try the project root first, then fall back to relative paths
+// In dev: execPath is at build/dev-macos-arm64/JensDJ-dev.app/Contents/MacOS/bun
+// Project root is 5 levels up from MacOS/
 const candidates = [
-  resolve(import.meta.dir, "../../../native/libdjengine.dylib"),
-  resolve(import.meta.dir, "../../native/libdjengine.dylib"),
-  resolve(import.meta.dir, "../native/libdjengine.dylib"),
+  // Dev mode: project root's native/
+  resolve(dirname(process.execPath), "../../../../../native/libdjengine.dylib"),
+  // Bundled app: Contents/native/
   resolve(dirname(process.execPath), "../native/libdjengine.dylib"),
+  // Bundled app: Contents/Resources/native/
   resolve(dirname(process.execPath), "../Resources/native/libdjengine.dylib"),
-  resolve(dirname(process.execPath), "../Resources/app/native/libdjengine.dylib"),
+  // Fallback: relative from source
+  resolve(import.meta.dir, "../../../native/libdjengine.dylib"),
   resolve(process.cwd(), "native/libdjengine.dylib"),
 ];
 
@@ -66,6 +70,10 @@ const lib = dlopen(libPath, {
     returns: FFIType.i32,
   },
   dj_get_peaks: {
+    args: [FFIType.cstring, FFIType.ptr, FFIType.i32],
+    returns: FFIType.i32,
+  },
+  dj_get_peaks_3band: {
     args: [FFIType.cstring, FFIType.ptr, FFIType.i32],
     returns: FFIType.i32,
   },
@@ -212,6 +220,34 @@ export const djGetPeaks = (
     numPoints
   );
   return result === 0 ? buffer : null;
+};
+
+export interface Peaks3Band {
+  low: number[];
+  mid: number[];
+  high: number[];
+}
+
+export const djGetPeaks3Band = (
+  filepath: string,
+  numPoints: number
+): Peaks3Band | null => {
+  const { buffer, ptr: bufPtr } = floatBuf(numPoints * 3);
+  const result = s.dj_get_peaks_3band(
+    cstr(filepath),
+    bufPtr as unknown as Pointer,
+    numPoints
+  );
+  if (result !== 0) return null;
+  const low: number[] = new Array(numPoints);
+  const mid: number[] = new Array(numPoints);
+  const high: number[] = new Array(numPoints);
+  for (let i = 0; i < numPoints; i++) {
+    low[i] = buffer[i * 3]!;
+    mid[i] = buffer[i * 3 + 1]!;
+    high[i] = buffer[i * 3 + 2]!;
+  }
+  return { low, mid, high };
 };
 
 export const djDetectBpm = (filepath: string): number =>
