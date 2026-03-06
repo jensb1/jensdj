@@ -230,6 +230,7 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
   const displayBpm = customBeats
     ? parseFloat(bpmValue)
     : state.track.metadata.bpm;
+  const currentPosition = positionRef.current;
 
   return (
     <div className="border-b border-zinc-800/50 bg-zinc-900/30 hover:bg-zinc-900/60 transition-colors">
@@ -263,7 +264,7 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
             downbeatOffset={downbeatOffset}
             zoom={10}
             isPlaying={state.isPlaying}
-            position={state.position}
+            position={currentPosition}
             lockedPosition={state.lockedPosition}
             onLockedPositionChange={handleLockedPositionChange}
             onHoverTimeChange={setZoomHoverTime}
@@ -345,7 +346,7 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
           beats={displayBeats}
           downbeatOffset={downbeatOffset}
           isPlaying={state.isPlaying}
-          position={state.position}
+          position={currentPosition}
           previewPosition={state.previewPosition}
           cues={trackCues}
           onSeek={handleSeek}
@@ -356,7 +357,7 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
 
         {/* Time */}
         <span ref={timeRef} className="font-mono text-[10px] text-zinc-400 shrink-0">
-          {formatTime(state.position)}
+          {formatTime(currentPosition)}
         </span>
         <span className="font-mono text-[9px] text-zinc-600 shrink-0">
           {formatTime(state.track.duration)}
