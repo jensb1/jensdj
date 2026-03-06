@@ -70,8 +70,8 @@ typedef struct {
     float* deinterleaved_out[MAX_CHANNELS];
 
     // Per-channel 3-band EQ filters (cascaded 2nd-order = 4th-order Butterworth)
-    LPFilter eq_lo_lp[MAX_CHANNELS][2];   // LP at 250Hz
-    HPFilter eq_hi_hp[MAX_CHANNELS][2];   // HP at 4000Hz
+    LPFilter eq_lo_lp[MAX_CHANNELS][2];   // LP at 500Hz
+    HPFilter eq_hi_hp[MAX_CHANNELS][2];   // HP at 2500Hz
     float* eq_lo_gain;   // pointer to DJSound.eq_lo
     float* eq_mid_gain;  // pointer to DJSound.eq_mid
     float* eq_hi_gain;   // pointer to DJSound.eq_hi
@@ -303,12 +303,12 @@ static DJStretchedSource* create_stretched_source(const char* filepath, ma_uint3
     src->rb = rubberband_new(target_samplerate, target_channels, opts, 1.0, 1.0);
     rubberband_set_max_process_size(src->rb, RB_BLOCK_SIZE);
 
-    // Initialize per-channel EQ filters
+    // Initialize per-channel EQ filters (crossover: 500Hz low/mid, 2500Hz mid/high)
     for (unsigned int ch = 0; ch < target_channels; ch++) {
-        lp_init(&src->eq_lo_lp[ch][0], 250.0f, (float)target_samplerate);
-        lp_init(&src->eq_lo_lp[ch][1], 250.0f, (float)target_samplerate);
-        hp_init(&src->eq_hi_hp[ch][0], 4000.0f, (float)target_samplerate);
-        hp_init(&src->eq_hi_hp[ch][1], 4000.0f, (float)target_samplerate);
+        lp_init(&src->eq_lo_lp[ch][0], 500.0f, (float)target_samplerate);
+        lp_init(&src->eq_lo_lp[ch][1], 500.0f, (float)target_samplerate);
+        hp_init(&src->eq_hi_hp[ch][0], 2500.0f, (float)target_samplerate);
+        hp_init(&src->eq_hi_hp[ch][1], 2500.0f, (float)target_samplerate);
     }
     src->eq_lo_gain = NULL;
     src->eq_mid_gain = NULL;

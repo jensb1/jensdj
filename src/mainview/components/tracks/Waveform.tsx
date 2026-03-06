@@ -17,9 +17,10 @@ interface WaveformProps {
   onPreview?: (seconds: number | null) => void;
   onPlayFromPreview?: (seconds: number) => void;
   onContainerRef?: (el: HTMLDivElement | null) => void;
+  onCueDrag?: (time: number | null) => void;
 }
 
-export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, isPlaying = false, position = 0, previewPosition, cues, onSeek, onPreview, onPlayFromPreview, onContainerRef }: WaveformProps) {
+export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, isPlaying = false, position = 0, previewPosition, cues, onSeek, onPreview, onPlayFromPreview, onContainerRef, onCueDrag }: WaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -377,6 +378,8 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
           duration={duration}
           containerWidth={containerRef.current?.getBoundingClientRect().width ?? 0}
           trackId={trackId}
+          beats={beats}
+          onCueDrag={onCueDrag}
         />
       )}
       {peaks.low.length === 0 && (

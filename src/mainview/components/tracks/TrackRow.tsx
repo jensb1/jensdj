@@ -185,6 +185,13 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
     await syncPlay(trackId, { targetAnchorPos: seconds });
   }, [trackId]);
 
+  const handleCueDrag = useCallback(
+    (time: number | null) => {
+      setLockedPosition(trackId, time);
+    },
+    [trackId, setLockedPosition]
+  );
+
   // Space = lock at current preview, Esc = unlock
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -348,6 +355,7 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
           onPreview={handlePreview}
           onPlayFromPreview={handlePlayFromPreview}
           onContainerRef={onWaveformRef}
+          onCueDrag={handleCueDrag}
         />
 
         {/* Time */}

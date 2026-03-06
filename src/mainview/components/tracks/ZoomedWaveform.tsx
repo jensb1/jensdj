@@ -1,6 +1,7 @@
 import { useRef, useEffect, useCallback } from "react";
 import type { Peaks3Band, CuePoint } from "../../../shared/types.ts";
 import { debugLog, debugLogThrottled } from "../../lib/debugLog.ts";
+import { useCueStore } from "../../stores/cueStore.ts";
 
 interface ZoomedWaveformProps {
   trackId: string;
@@ -28,6 +29,7 @@ export function ZoomedWaveform({
   const viewPosition = useRef(0);
   const loopRegion = useRef<{ start: number; end: number } | null>(null);
   const redrawRef = useRef<() => void>(() => {});
+  const draggingCueRef = useRef<string | null>(null);
 
   const isLocked = lockedPosition != null;
 
@@ -381,6 +383,23 @@ export function ZoomedWaveform({
 
   const handleMouseDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
+      // Check if clicking near a cue marker
+      if (cues && cues.length > 0) {
+        const rect = e.currentTarget.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const halfWindow = zoom / 2;
+        const timeStart = viewPosition.current - halfWindow;
+        for (const cue of cues) {
+          if (cue.time < timeStart || cue.time > timeStart + zoom) continue;
+          const cueX = ((cue.time - timeStart) / zoom) * rect.width;
+          if (Math.abs(mouseX - cueX) < 8) {
+            draggingCueRef.current = cue.id;
+            e.currentTarget.style.cursor = "ew-resize";
+            return;
+          }
+        }
+      }
+
       if (!canDrag) return;
       isDragging.current = true;
       debugLog("zoomedWaveform.mouseDown", {
@@ -394,12 +413,34 @@ export function ZoomedWaveform({
       dragStartPos.current = viewPosition.current;
       e.currentTarget.style.cursor = "grabbing";
     },
-    [canDrag]
+    [canDrag, cues, zoom]
   );
 
   const handleMouseMove = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       const rect = e.currentTarget.getBoundingClientRect();
+
+      // Cue marker dragging
+      if (draggingCueRef.current) {
+        const mouseX = e.clientX - rect.left;
+        const halfWindow = zoom / 2;
+        const timeStart = viewPosition.current - halfWindow;
+        let time = timeStart + (mouseX / rect.width) * zoom;
+        time = Math.max(0, Math.min(duration, time));
+
+        if (beats && beats.length > 0) {
+          let nearest = beats[0] ?? 0;
+          let minDist = Infinity;
+          for (const bt of beats) {
+            const d = Math.abs(bt - time);
+            if (d < minDist) { minDist = d; nearest = bt; }
+          }
+          time = nearest;
+        }
+
+        useCueStore.getState().updateCue(draggingCueRef.current, { time });
+        return;
+      }
 
       if (isDragging.current && canDrag) {
         const dx = e.clientX - dragStartX.current;
@@ -442,12 +483,35 @@ export function ZoomedWaveform({
       const timeStart = viewPosition.current - halfWindow;
       const hoverTime = timeStart + (relX / rect.width) * zoom;
       onHoverTimeChange?.(Math.max(0, Math.min(duration, hoverTime)));
+
+      // Cue proximity cursor
+      if (!isDragging.current && cues && cues.length > 0) {
+        let nearCue = false;
+        for (const cue of cues) {
+          if (cue.time < timeStart || cue.time > timeStart + zoom) continue;
+          const cueX = ((cue.time - timeStart) / zoom) * rect.width;
+          if (Math.abs(relX - cueX) < 8) {
+            nearCue = true;
+            break;
+          }
+        }
+        if (nearCue) {
+          e.currentTarget.style.cursor = "ew-resize";
+        } else {
+          e.currentTarget.style.cursor = canDrag ? "grab" : "default";
+        }
+      }
     },
-    [zoom, beats, duration, trackId, draw, canDrag, isLocked, onLockedPositionChange, onHoverTimeChange]
+    [zoom, beats, duration, trackId, draw, canDrag, isLocked, cues, onLockedPositionChange, onHoverTimeChange]
   );
 
   const handleMouseUp = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (draggingCueRef.current) {
+        draggingCueRef.current = null;
+        e.currentTarget.style.cursor = canDrag ? "grab" : "default";
+        return;
+      }
       isDragging.current = false;
       e.currentTarget.style.cursor = canDrag ? "grab" : "default";
     },
@@ -455,6 +519,7 @@ export function ZoomedWaveform({
   );
 
   const handleMouseLeave = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    draggingCueRef.current = null;
     isDragging.current = false;
     e.currentTarget.style.cursor = canDrag ? "grab" : "default";
     onHoverTimeChange?.(null);
