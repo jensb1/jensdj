@@ -112,7 +112,11 @@ export function CueMarkers({ cues, duration, containerWidth, trackId }: CueMarke
               onMouseEnter={() => keepCueHovered(cue.id)}
               onMouseLeave={() => releaseCueHover(cue.id)}
               onMouseDown={stop}
-              onClick={() => { void activateCue(trackId, cue); }}
+              onClick={() => {
+                if (cue.connectedCueId) {
+                  void activateCue(trackId, cue);
+                }
+              }}
             >
               <div
                 className="absolute top-0 bottom-0"
@@ -122,12 +126,16 @@ export function CueMarkers({ cues, duration, containerWidth, trackId }: CueMarke
 
             {/* Label badge */}
             <div
-              className="absolute pointer-events-auto cursor-pointer"
+              className={`absolute pointer-events-auto ${cue.connectedCueId ? "cursor-pointer" : ""}`}
               style={{ left: x - 1, top: 0, zIndex: 10 }}
               onMouseEnter={() => keepCueHovered(cue.id)}
               onMouseLeave={() => releaseCueHover(cue.id)}
               onMouseDown={stop}
-              onClick={() => { void activateCue(trackId, cue); }}
+              onClick={() => {
+                if (cue.connectedCueId) {
+                  void activateCue(trackId, cue);
+                }
+              }}
             >
               <div
                 className="px-1 py-px text-[8px] font-bold font-mono rounded-b leading-tight"
