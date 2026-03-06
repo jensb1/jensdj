@@ -182,13 +182,8 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
 
   const handlePlayFromPreview = useCallback(async (seconds: number) => {
     positionRef.current = seconds;
-    await window.djRpc?.request?.seek?.({ trackId, seconds });
-    setPreviewPosition(trackId, null);
-    setLockedPosition(trackId, null);
-    if (!state.isPlaying) {
-      await syncPlay(trackId);
-    }
-  }, [trackId, setLockedPosition, setPreviewPosition, state.isPlaying]);
+    await syncPlay(trackId, { targetAnchorPos: seconds });
+  }, [trackId]);
 
   // Space = lock at current preview, Esc = unlock
   useEffect(() => {

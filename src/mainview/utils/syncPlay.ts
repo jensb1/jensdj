@@ -5,16 +5,24 @@ import { debugLog, logInfo } from "../lib/debugLog.ts";
 const IMMEDIATE_BEAT_SYNC_MIN_WINDOW_SEC = 0.15;
 const IMMEDIATE_BEAT_SYNC_MIN_PREROLL_SEC = 0.02;
 
+interface SyncPlayOptions {
+  targetAnchorPos?: number | null;
+}
+
 /**
  * Play a track, auto-syncing to any currently playing track.
  * Gets real source position from backend, then tells C engine to
  * start the target at a matching synced position.
  */
-export async function syncPlay(trackId: string): Promise<void> {
+export async function syncPlay(trackId: string, options: SyncPlayOptions = {}): Promise<void> {
   const store = usePlayerStore.getState();
   const tracks = store.tracks;
   const thisTrack = tracks.get(trackId);
   if (!thisTrack) return;
+  const explicitTargetAnchorPos =
+    typeof options.targetAnchorPos === "number" && Number.isFinite(options.targetAnchorPos)
+      ? options.targetAnchorPos
+      : null;
 
   const unlockVisualFollow = () => {
     debugLog("syncPlay.unlockVisualFollow", {
@@ -32,6 +40,7 @@ export async function syncPlay(trackId: string): Promise<void> {
   debugLog("syncPlay.begin", {
     trackId,
     storeIsPlaying: thisTrack.isPlaying,
+    explicitTargetAnchorPos,
     previewPosition: thisTrack.previewPosition,
     lockedPosition: thisTrack.lockedPosition,
   });
@@ -68,6 +77,7 @@ export async function syncPlay(trackId: string): Promise<void> {
       const targetState = await window.djRpc?.request?.getPlaybackState?.({ trackId });
       const targetPos = targetState?.position ?? 0;
       const targetAnchorPos =
+        explicitTargetAnchorPos ??
         thisTrack.lockedPosition ??
         thisTrack.previewPosition ??
         null;
@@ -221,13 +231,17 @@ export async function syncPlay(trackId: string): Promise<void> {
   }
 
   // Fallback: normal play
-  await window.djRpc?.request?.play?.({ trackId });
+  await window.djRpc?.request?.play?.({
+    trackId,
+    fromTime: explicitTargetAnchorPos ?? undefined,
+  });
   const playbackState = await window.djRpc?.request?.getPlaybackState?.({ trackId });
   debugLog("syncPlay.fallbackPlay", {
     trackId,
+    explicitTargetAnchorPos,
     playbackState,
   });
-  logInfo("playback.fallbackPlay", { trackId, playbackState });
+  logInfo("playback.fallbackPlay", { trackId, explicitTargetAnchorPos, playbackState });
   unlockVisualFollow();
   store.setPlaying(trackId, true);
 }

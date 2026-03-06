@@ -327,7 +327,6 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
       };
       const onUp = () => {
         isDragging.current = false;
-        if (isPlaying) onPreview?.(null);
         window.removeEventListener("mousemove", onMove);
         window.removeEventListener("mouseup", onUp);
       };
@@ -360,7 +359,10 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
             left: `${previewPercent}%`,
             transform: "translateX(-50%)",
           }}
-          onMouseDown={(e) => e.stopPropagation()}
+          onMouseDown={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+          }}
           onClick={(e) => {
             e.stopPropagation();
             onPlayFromPreview(previewPosition);
