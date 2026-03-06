@@ -10,15 +10,16 @@ interface ZoomedWaveformProps {
   downbeatOffset?: number;
   zoom: number; // seconds visible in viewport
   isPlaying?: boolean;
+  position?: number;
   lockedPosition?: number | null;
   onLockedPositionChange?: (pos: number) => void;
-  onHoverInfoChange?: (info: string | null) => void;
+  onHoverTimeChange?: (time: number | null) => void;
   cues?: CuePoint[];
 }
 
 export function ZoomedWaveform({
   trackId, peaks, duration, beats, downbeatOffset = 0, zoom,
-  isPlaying = false, lockedPosition, onLockedPositionChange, onHoverInfoChange, cues,
+  isPlaying = false, position = 0, lockedPosition, onLockedPositionChange, onHoverTimeChange, cues,
 }: ZoomedWaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number>(0);
@@ -284,6 +285,16 @@ export function ZoomedWaveform({
     return () => observer.disconnect();
   }, [redraw]);
 
+  useEffect(() => {
+    playbackPosition.current = position;
+    if (lockedPosition != null) {
+      viewPosition.current = lockedPosition;
+    } else if (!isPlaying) {
+      viewPosition.current = position;
+    }
+    redraw();
+  }, [position, lockedPosition, isPlaying, redraw]);
+
   // Update view position when lock changes
   useEffect(() => {
     debugLog("zoomedWaveform.lockState", {
@@ -425,20 +436,9 @@ export function ZoomedWaveform({
       const halfWindow = zoom / 2;
       const timeStart = viewPosition.current - halfWindow;
       const hoverTime = timeStart + (relX / rect.width) * zoom;
-      let nearestBeat = 0;
-      let nearestIdx = -1;
-      let minDist = Infinity;
-      if (beats) {
-        for (let i = 0; i < beats.length; i++) {
-          const d = Math.abs((beats[i] ?? 0) - hoverTime);
-          if (d < minDist) { minDist = d; nearestBeat = beats[i] ?? 0; nearestIdx = i; }
-        }
-      }
-      const beatNum = nearestIdx >= 0 ? `beat[${nearestIdx}]=${nearestBeat.toFixed(3)}s` : "no beats";
-      const diff = nearestIdx >= 0 ? `Δ${((hoverTime - nearestBeat) * 1000).toFixed(0)}ms` : "";
-      onHoverInfoChange?.(`t=${hoverTime.toFixed(3)}s | ${beatNum} ${diff}`.trim());
+      onHoverTimeChange?.(Math.max(0, Math.min(duration, hoverTime)));
     },
-    [zoom, beats, duration, trackId, draw, canDrag, isLocked, onLockedPositionChange, onHoverInfoChange]
+    [zoom, beats, duration, trackId, draw, canDrag, isLocked, onLockedPositionChange, onHoverTimeChange]
   );
 
   const handleMouseUp = useCallback(
@@ -452,8 +452,8 @@ export function ZoomedWaveform({
   const handleMouseLeave = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     isDragging.current = false;
     e.currentTarget.style.cursor = canDrag ? "grab" : "default";
-    onHoverInfoChange?.(null);
-  }, [canDrag, onHoverInfoChange]);
+    onHoverTimeChange?.(null);
+  }, [canDrag, onHoverTimeChange]);
 
   return (
     <div className="relative">

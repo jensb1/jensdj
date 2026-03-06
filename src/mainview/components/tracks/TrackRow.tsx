@@ -86,6 +86,13 @@ function formatTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+function formatPreciseTime(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  const ms = Math.floor((seconds % 1) * 1000);
+  return `${m}:${s.toString().padStart(2, "0")}.${ms.toString().padStart(3, "0")}`;
+}
+
 export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
   const removeTrack = usePlayerStore((s) => s.removeTrack);
   const cuesMap = useCueStore((s) => s.cues);
@@ -103,7 +110,7 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
   );
   const [customBeats, setCustomBeats] = useState<number[] | null>(null);
   const [downbeatOffset, setDownbeatOffset] = useState(0); // 0-3: which beat index is "1"
-  const [zoomHoverInfo, setZoomHoverInfo] = useState<string | null>(null);
+  const [zoomHoverTime, setZoomHoverTime] = useState<number | null>(null);
 
   const positionRef = useRef(state.position);
 
@@ -242,7 +249,12 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
         </div>
 
         {/* Zoomed waveform */}
-        <div className="flex-1">
+        <div className="flex-1 relative">
+          {zoomHoverTime != null && (
+            <div className="absolute top-1 right-2 z-20 rounded bg-black/70 px-1.5 py-px text-[8px] font-mono text-zinc-300 pointer-events-none">
+              {formatPreciseTime(zoomHoverTime)}
+            </div>
+          )}
           <ZoomedWaveform
             trackId={trackId}
             peaks={state.track.peaks}
@@ -251,9 +263,10 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
             downbeatOffset={downbeatOffset}
             zoom={10}
             isPlaying={state.isPlaying}
+            position={state.position}
             lockedPosition={state.lockedPosition}
             onLockedPositionChange={handleLockedPositionChange}
-            onHoverInfoChange={setZoomHoverInfo}
+            onHoverTimeChange={setZoomHoverTime}
             cues={trackCues}
           />
         </div>
@@ -324,12 +337,6 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
         {/* Cue toolbar */}
         <CueToolbar trackId={trackId} getPosition={() => state.lockedPosition ?? positionRef.current} beats={displayBeats} />
 
-        {zoomHoverInfo && (
-          <span className="max-w-[220px] truncate text-[8px] font-mono text-zinc-500 shrink-0">
-            {zoomHoverInfo}
-          </span>
-        )}
-
         {/* Overview waveform */}
         <Waveform
           trackId={trackId}
@@ -338,6 +345,7 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
           beats={displayBeats}
           downbeatOffset={downbeatOffset}
           isPlaying={state.isPlaying}
+          position={state.position}
           previewPosition={state.previewPosition}
           cues={trackCues}
           onSeek={handleSeek}

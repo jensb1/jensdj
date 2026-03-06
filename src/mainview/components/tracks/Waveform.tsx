@@ -10,6 +10,7 @@ interface WaveformProps {
   beats?: number[];
   downbeatOffset?: number;
   isPlaying?: boolean;
+  position?: number;
   previewPosition?: number | null;
   cues?: CuePoint[];
   onSeek: (seconds: number) => void;
@@ -18,7 +19,7 @@ interface WaveformProps {
   onContainerRef?: (el: HTMLDivElement | null) => void;
 }
 
-export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, isPlaying = false, previewPosition, cues, onSeek, onPreview, onPlayFromPreview, onContainerRef }: WaveformProps) {
+export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, isPlaying = false, position = 0, previewPosition, cues, onSeek, onPreview, onPlayFromPreview, onContainerRef }: WaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -219,6 +220,13 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
     });
     flushOverlayDraw();
   }, [trackId, isPlaying, previewPosition, flushOverlayDraw]);
+
+  useEffect(() => {
+    if (duration <= 0) return;
+    if (isPlaying) return;
+    playheadPct.current = position / duration;
+    flushOverlayDraw();
+  }, [position, duration, isPlaying, flushOverlayDraw]);
 
   // Playback ticks
   useEffect(() => {

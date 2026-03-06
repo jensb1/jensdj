@@ -48,10 +48,11 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
         title: track.metadata.title,
         duration: Number(track.duration.toFixed(3)),
       });
+      const initialPosition = track.beats[0] ?? 0;
       const tracks = new Map(state.tracks);
       tracks.set(track.id, {
         track,
-        position: 0,
+        position: initialPosition,
         isPlaying: false,
         volume: 1,
         deviceId: -1,

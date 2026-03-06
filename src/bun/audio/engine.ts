@@ -175,6 +175,10 @@ export class AudioEngine {
     this.tracks.set(id, track);
 
     const analysis = this.analyze(filePath);
+    const firstBeat = analysis.beats[0];
+    if (firstBeat !== undefined && Number.isFinite(firstBeat) && firstBeat > 0) {
+      djSeek(soundPtr, firstBeat);
+    }
 
     // Store BPM in native engine for auto-sync
     if (analysis.bpm > 0) {
