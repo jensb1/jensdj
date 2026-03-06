@@ -48,6 +48,15 @@ int dj_is_looping(void* sound);
 int dj_schedule_sync_play(void* target_sound, float target_seconds,
                           void* source_sound, float source_seconds);
 
+// Immediate synced start: reads source position in real-time,
+// seeks the target to a matching phase or transport position,
+// then starts sample-accurately.
+// preserve_transport: when non-zero, keep the full elapsed offset from source_beat
+// instead of only matching the current bar phase.
+int dj_sync_start(void* target_sound, float target_beat,
+                   void* source_sound, float source_beat, float bar_duration,
+                   int preserve_transport);
+
 // Cancel a previously scheduled start (before it fires)
 int dj_cancel_scheduled_start(void* sound);
 

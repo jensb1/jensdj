@@ -3,6 +3,8 @@ import type { MainViewRPC } from "../shared/types.ts";
 import { createRoot } from "react-dom/client";
 import { createElement } from "react";
 import { MainLayout } from "./components/layout/MainLayout.tsx";
+import { debugLog, debugLogThrottled } from "./lib/debugLog.ts";
+import { usePlayerStore } from "./stores/playerStore.ts";
 
 console.log("[View] Initializing...");
 
@@ -12,10 +14,28 @@ const rpc = Electroview.defineRPC<MainViewRPC>({
   handlers: {
     requests: {},
     messages: {
-      playbackTick: ({ trackId, position, level, loopStart, loopEnd }) => {
+      playbackTick: ({ trackId, position, isPlaying, level, loopStart, loopEnd }) => {
+        const trackState = usePlayerStore.getState().tracks.get(trackId);
+        if (trackState && trackState.isPlaying !== isPlaying) {
+          debugLog("index.backendPlayingState", {
+            trackId,
+            from: trackState.isPlaying,
+            to: isPlaying,
+            position: Number(position.toFixed(3)),
+          });
+          usePlayerStore.getState().setPlaying(trackId, isPlaying);
+        }
+        debugLogThrottled(`playbackTick:${trackId}`, 1000, "index.playbackTick", {
+          trackId,
+          position: Number(position.toFixed(3)),
+          isPlaying,
+          level: Number(level.toFixed(3)),
+          loopStart: loopStart != null ? Number(loopStart.toFixed(3)) : null,
+          loopEnd: loopEnd != null ? Number(loopEnd.toFixed(3)) : null,
+        });
         window.dispatchEvent(
           new CustomEvent("dj:playbackTick", {
-            detail: { trackId, position, level, loopStart, loopEnd },
+            detail: { trackId, position, isPlaying, level, loopStart, loopEnd },
           })
         );
       },
@@ -48,6 +68,22 @@ declare global {
 window.djRpc = electroview.rpc;
 
 console.log("[View] RPC initialized, djRpc available:", !!window.djRpc);
+debugLog("index.rpcReady", { hasRpc: !!window.djRpc });
+
+window.addEventListener("error", (event) => {
+  debugLog("window.error", {
+    message: event.message,
+    filename: event.filename,
+    lineno: event.lineno,
+    colno: event.colno,
+  });
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  debugLog("window.unhandledrejection", {
+    reason: String(event.reason),
+  });
+});
 
 // Mount React
 const root = document.getElementById("root");

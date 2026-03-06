@@ -1,11 +1,8 @@
-import { BrowserView, Utils } from "electrobun/bun";
+import { BrowserView } from "electrobun/bun";
 import type { MainViewRPC } from "../shared/types.ts";
 import { AudioEngine } from "./audio/engine.ts";
-import { parseFile } from "music-metadata";
-import { homedir } from "os";
-import { join } from "path";
-import { initDB, searchTracks, getTrackCount } from "./library/db.ts";
-import { scanDirectory as scanDir } from "./library/scanner.ts";
+import { initDB } from "./library/db.ts";
+import { createRpcRequestHandlers } from "./rpcCore.ts";
 
 const engine = new AudioEngine();
 
@@ -25,183 +22,10 @@ export function createRPC() {
   return BrowserView.defineRPC<MainViewRPC>({
     maxRequestTime: 120000,
     handlers: {
-      requests: {
-        loadTrack: async ({ filePath }) => {
-          console.log("[RPC] loadTrack:", filePath);
-
-          // Skip macOS resource fork files
-          const fileName = filePath.split("/").pop() ?? "";
-          if (fileName.startsWith("._")) {
-            throw new Error(`Skipping resource fork file: ${fileName}`);
-          }
-
-          let metadata = {
-            title: fileName,
-            artist: "Unknown",
-            album: "",
-            genre: "",
-            duration: 0,
-            bpm: 0,
-            key: "",
-            filePath,
-          };
-
-          try {
-            const mm = await parseFile(filePath);
-            metadata = {
-              title: mm.common.title ?? metadata.title,
-              artist: mm.common.artist ?? "Unknown",
-              album: mm.common.album ?? "",
-              genre: mm.common.genre?.[0] ?? "",
-              duration: mm.format.duration ?? 0,
-              bpm: mm.common.bpm ?? 0,
-              key: "",
-              filePath,
-            };
-            console.log("[RPC] Metadata:", metadata.title, "-", metadata.artist);
-          } catch (e) {
-            console.warn("[RPC] Metadata extraction failed:", e);
-          }
-
-          try {
-            const track = engine.loadTrack(filePath, metadata);
-            console.log("[RPC] Track loaded:", track.id, "duration:", track.duration);
-            return track;
-          } catch (e) {
-            console.error("[RPC] loadTrack failed:", e);
-            throw e;
-          }
-        },
-
-        unloadTrack: ({ trackId }) => {
-          engine.unloadTrack(trackId);
-        },
-
-        play: ({ trackId, fromTime }) => {
-          engine.play(trackId, fromTime);
-        },
-
-        pause: ({ trackId }) => {
-          engine.pause(trackId);
-        },
-
-        stop: ({ trackId }) => {
-          engine.stop(trackId);
-        },
-
-        seek: ({ trackId, seconds }) => {
-          engine.seek(trackId, seconds);
-          // Send immediate position update so waveform updates even when paused
-          webviewRef?.rpc?.send?.playbackTick?.({
-            trackId,
-            position: engine.getPosition(trackId),
-            level: 0,
-          });
-        },
-
-        setVolume: ({ trackId, volume }) => {
-          engine.setVolume(trackId, volume);
-        },
-
-        setEQ: ({ trackId, eq }) => {
-          engine.setEQ(trackId, eq);
-        },
-
-        setOutputDevice: ({ trackId, deviceId }) => {
-          engine.setOutputDevice(trackId, deviceId);
-        },
-
-        getOutputDevices: () => {
-          return engine.getDevices();
-        },
-
-        scheduleSyncPlay: ({ targetTrackId, targetBeatSeconds, sourceTrackId, sourceBeatSeconds }) => {
-          return engine.scheduleSyncPlay(targetTrackId, targetBeatSeconds, sourceTrackId, sourceBeatSeconds);
-        },
-
-        cancelScheduledStart: ({ trackId }) => {
-          engine.cancelScheduledStart(trackId);
-        },
-
-        setLoop: ({ trackId, startSec, endSec }) => {
-          engine.setLoop(trackId, startSec, endSec);
-        },
-
-        clearLoop: ({ trackId }) => {
-          engine.clearLoop(trackId);
-        },
-
-        setMasterBpm: ({ bpm }) => {
-          engine.setMasterBpm(bpm);
-        },
-
-        getPlaybackState: ({ trackId }) => {
-          return {
-            position: engine.getPosition(trackId),
-            isPlaying: engine.isPlaying(trackId),
-          };
-        },
-
-        openFileDialog: async () => {
-          console.log("[RPC] openFileDialog called — calling Utils...");
-          try {
-            const paths = await Utils.openFileDialog({
-              startingFolder: join(homedir(), "Music"),
-              allowedFileTypes: "*",
-              canChooseFiles: true,
-              canChooseDirectory: false,
-              allowsMultipleSelection: true,
-            });
-            console.log("[RPC] openFileDialog result:", paths);
-            const audioExts = [".mp3", ".wav", ".flac", ".aac", ".m4a", ".ogg", ".aiff"];
-            const filtered = (paths ?? []).filter((p) => {
-              const ext = p.toLowerCase().slice(p.lastIndexOf("."));
-              return audioExts.includes(ext);
-            });
-            return filtered;
-          } catch (e) {
-            console.error("[RPC] openFileDialog error:", e);
-            return [];
-          }
-        },
-
-        openDirectoryDialog: async () => {
-          const paths = await Utils.openFileDialog({
-            startingFolder: join(homedir(), "Music"),
-            allowedFileTypes: "*",
-            canChooseFiles: false,
-            canChooseDirectory: true,
-            allowsMultipleSelection: false,
-          });
-          return paths?.[0] ?? "";
-        },
-
-        scanDirectory: async ({ dirPath }) => {
-          console.log("[RPC] scanDirectory:", dirPath);
-          await scanDir(dirPath, {
-            onProgress: (current, total, file) => {
-              webviewRef?.rpc?.send?.scanProgress?.({ current, total, file });
-            },
-            onComplete: (added) => {
-              console.log("[RPC] Scan complete:", added, "files. Total library:", getTrackCount());
-            },
-          });
-        },
-
-        searchLibrary: ({ query, sortBy, sortDir }) => {
-          const dir = sortDir === "desc" ? "desc" : "asc";
-          return searchTracks(query ?? "", sortBy ?? "title", dir).map((t) => ({
-            title: t.title,
-            artist: t.artist,
-            album: t.album,
-            genre: t.genre,
-            duration: t.duration,
-            bpm: t.bpm,
-            key: t.key,
-            filePath: t.filePath,
-          }));
-        },
-      },
+      requests: createRpcRequestHandlers(engine, {
+        sendPlaybackTick: (payload) => webviewRef?.rpc?.send?.playbackTick?.(payload),
+        sendScanProgress: (payload) => webviewRef?.rpc?.send?.scanProgress?.(payload),
+      }),
       messages: {
         "*": (messageName, payload) => {
           console.log("[RPC message]", messageName, payload);
@@ -218,17 +42,38 @@ export function createRPC() {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function startPlaybackTicker(webview: any, intervalMs = 16) {
   webviewRef = webview;
+  let logCounter = 0;
+  const lastSnapshots = new Map<string, { position: number; isPlaying: boolean }>();
   return setInterval(() => {
+    const positions: Record<string, number> = {};
     for (const trackId of engine.getAllTrackIds()) {
-      if (engine.isPlaying(trackId)) {
-        const loop = engine.getActiveLoop(trackId);
-        webview.rpc?.send?.playbackTick?.({
-          trackId,
-          position: engine.getPosition(trackId),
-          level: engine.getLevel(trackId),
-          ...(loop ? { loopStart: loop.start, loopEnd: loop.end } : {}),
-        });
+      const pos = engine.getPosition(trackId);
+      const isPlaying = engine.isPlaying(trackId);
+      const last = lastSnapshots.get(trackId);
+      const positionChanged = !last || Math.abs(last.position - pos) > 0.0005;
+      const playingChanged = !last || last.isPlaying !== isPlaying;
+      lastSnapshots.set(trackId, { position: pos, isPlaying });
+
+      if (!isPlaying && !positionChanged && !playingChanged) continue;
+
+      if (isPlaying) {
+        positions[trackId] = pos;
       }
+
+      const loop = engine.getActiveLoop(trackId);
+      webview.rpc?.send?.playbackTick?.({
+        trackId,
+        position: pos,
+        isPlaying,
+        level: isPlaying ? engine.getLevel(trackId) : 0,
+        ...(loop ? { loopStart: loop.start, loopEnd: loop.end } : {}),
+      });
+    }
+    if (Object.keys(positions).length >= 2 && ++logCounter % 60 === 0) {
+      const ids = Object.keys(positions);
+      const posStrs = ids.map((id) => `${id}=${positions[id]!.toFixed(4)}s`).join(" ");
+      const diff = Math.abs(positions[ids[0]!]! - positions[ids[1]!]!);
+      console.log(`[SYNC] ${posStrs} diff=${(diff * 1000).toFixed(1)}ms`);
     }
   }, intervalMs);
 }

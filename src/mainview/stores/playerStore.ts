@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { LoadedTrack, OutputDevice } from "../../shared/types.ts";
+import { debugLog } from "../lib/debugLog.ts";
 
 export interface TrackState {
   track: LoadedTrack;
@@ -37,6 +38,11 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
 
   addTrack: (track) =>
     set((state) => {
+      debugLog("playerStore.addTrack", {
+        trackId: track.id,
+        title: track.metadata.title,
+        duration: Number(track.duration.toFixed(3)),
+      });
       const tracks = new Map(state.tracks);
       tracks.set(track.id, {
         track,
@@ -53,6 +59,7 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
 
   removeTrack: (trackId) =>
     set((state) => {
+      debugLog("playerStore.removeTrack", { trackId });
       const tracks = new Map(state.tracks);
       tracks.delete(trackId);
       return { tracks };
@@ -71,6 +78,14 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
     set((state) => {
       const existing = state.tracks.get(trackId);
       if (!existing) return state;
+      if (existing.isPlaying === isPlaying) return state;
+      debugLog("playerStore.setPlaying", {
+        trackId,
+        from: existing.isPlaying,
+        to: isPlaying,
+        lockedPosition: existing.lockedPosition,
+        previewPosition: existing.previewPosition,
+      });
       const tracks = new Map(state.tracks);
       tracks.set(trackId, { ...existing, isPlaying });
       return { tracks };
@@ -100,6 +115,11 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
     set((state) => {
       const existing = state.tracks.get(trackId);
       if (!existing) return state;
+      debugLog("playerStore.setPreviewPosition", {
+        trackId,
+        from: existing.previewPosition,
+        to: position,
+      });
       const tracks = new Map(state.tracks);
       tracks.set(trackId, { ...existing, previewPosition: position });
       return { tracks };
@@ -109,6 +129,12 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
     set((state) => {
       const existing = state.tracks.get(trackId);
       if (!existing) return state;
+      debugLog("playerStore.setLockedPosition", {
+        trackId,
+        from: existing.lockedPosition,
+        to: position,
+        isPlaying: existing.isPlaying,
+      });
       const tracks = new Map(state.tracks);
       tracks.set(trackId, { ...existing, lockedPosition: position });
       return { tracks };

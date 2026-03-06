@@ -1,6 +1,7 @@
 import { useRef, useEffect, useCallback } from "react";
 import type { Peaks3Band, CuePoint } from "../../../shared/types.ts";
 import { CueMarkers } from "./CueMarkers.tsx";
+import { debugLog, debugLogThrottled } from "../../lib/debugLog.ts";
 
 interface WaveformProps {
   trackId: string;
@@ -22,6 +23,7 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
   const overlayRef = useRef<HTMLCanvasElement>(null);
   const playheadPct = useRef(0);
   const animFrameRef = useRef<number>(0);
+  const drawTimeoutRef = useRef<number>(0);
 
   // Draw the static waveform + beat grid
   const drawStatic = useCallback((canvas: HTMLCanvasElement) => {
@@ -159,6 +161,26 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
     ctx.restore();
   }, [isPlaying]);
 
+  const flushOverlayDraw = useCallback(() => {
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = 0;
+    }
+    if (drawTimeoutRef.current) {
+      clearTimeout(drawTimeoutRef.current);
+      drawTimeoutRef.current = 0;
+    }
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    debugLogThrottled(`waveform.draw:${trackId}`, 1000, "waveform.drawFrame", {
+      trackId,
+      isPlaying,
+      playheadPct: Number(playheadPct.current.toFixed(4)),
+      previewPosition,
+    });
+    drawOverlay(overlay, playheadPct.current);
+  }, [trackId, isPlaying, previewPosition, drawOverlay]);
+
   // Initial draw + resize observer
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -185,7 +207,27 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    debugLog("waveform.playStateRedraw", {
+      trackId,
+      isPlaying,
+      playheadPct: Number(playheadPct.current.toFixed(4)),
+      previewPosition,
+    });
+    flushOverlayDraw();
+  }, [trackId, isPlaying, previewPosition, flushOverlayDraw]);
+
   // Playback ticks
+  useEffect(() => {
+    debugLog("waveform.isPlaying", {
+      trackId,
+      isPlaying,
+      previewPosition,
+    });
+  }, [trackId, isPlaying, previewPosition]);
+
   useEffect(() => {
     const handler = (e: Event) => {
       const { trackId: tid, position, loopStart, loopEnd } = (e as CustomEvent).detail;
@@ -194,20 +236,31 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
       loopPctRef.current = (loopStart != null && loopEnd != null)
         ? { start: loopStart / duration, end: loopEnd / duration }
         : null;
+      debugLogThrottled(`waveform.tick:${trackId}`, 1000, "waveform.tick", {
+        trackId,
+        isPlaying,
+        position: Number(position.toFixed(3)),
+        playheadPct: Number(playheadPct.current.toFixed(4)),
+        previewPosition,
+        loopStart: loopStart != null ? Number(loopStart.toFixed(3)) : null,
+        loopEnd: loopEnd != null ? Number(loopEnd.toFixed(3)) : null,
+      });
       if (!animFrameRef.current) {
         animFrameRef.current = requestAnimationFrame(() => {
-          const overlay = overlayRef.current;
-          if (overlay) drawOverlay(overlay, playheadPct.current);
-          animFrameRef.current = 0;
+          flushOverlayDraw();
         });
+        drawTimeoutRef.current = window.setTimeout(() => {
+          flushOverlayDraw();
+        }, 34);
       }
     };
     window.addEventListener("dj:playbackTick", handler);
     return () => {
       window.removeEventListener("dj:playbackTick", handler);
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      if (drawTimeoutRef.current) clearTimeout(drawTimeoutRef.current);
     };
-  }, [trackId, duration, drawOverlay, isPlaying]);
+  }, [trackId, duration, flushOverlayDraw, isPlaying, previewPosition]);
 
   // Update preview from prop
   useEffect(() => {

@@ -97,6 +97,7 @@ typedef struct {
     float eq_hi;
     float current_level;
     float original_bpm;
+    int scheduled; // 1 = sync_start pending, waiting for engine clock
 } DJSound;
 
 // --- Globals ---
@@ -464,6 +465,7 @@ void* dj_load_sound(void* engine, const char* filepath) {
     snd->eq_hi = 1.0f;
     snd->current_level = 0.0f;
     snd->original_bpm = 0.0f;
+    snd->scheduled = 0;
 
     // Wire EQ gain pointers so stretched_read can access them directly
     source->eq_lo_gain = &snd->eq_lo;
@@ -484,21 +486,38 @@ void dj_unload_sound(void* sound) {
 int dj_play(void* sound) {
     if (!sound) return -1;
     DJSound* snd = (DJSound*)sound;
-    return ma_sound_start(&snd->sound) == MA_SUCCESS ? 0 : -1;
+    ma_result r = ma_sound_start(&snd->sound);
+    fprintf(stderr, "[dj_play] result=%d is_playing=%d\n", r, ma_sound_is_playing(&snd->sound));
+    return r == MA_SUCCESS ? 0 : -1;
 }
 
 int dj_pause(void* sound) {
     if (!sound) return -1;
     DJSound* snd = (DJSound*)sound;
-    return ma_sound_stop(&snd->sound) == MA_SUCCESS ? 0 : -1;
+    float paused_at = 0.0f;
+    ma_sound_get_cursor_in_seconds(&snd->sound, &paused_at);
+    snd->scheduled = 0;
+    ma_sound_set_start_time_in_pcm_frames(&snd->sound, 0);
+    ma_result r = ma_sound_stop(&snd->sound);
+    int seek_result = 0;
+    if (r == MA_SUCCESS) {
+        seek_result = dj_seek(sound, paused_at);
+    }
+    float after_pause = 0.0f;
+    ma_sound_get_cursor_in_seconds(&snd->sound, &after_pause);
+    fprintf(stderr, "[dj_pause] result=%d seek=%d paused_at=%.4f after=%.4f is_playing=%d\n",
+            r, seek_result, paused_at, after_pause, ma_sound_is_playing(&snd->sound));
+    return r == MA_SUCCESS ? 0 : -1;
 }
 
 int dj_stop(void* sound) {
     if (!sound) return -1;
     DJSound* snd = (DJSound*)sound;
+    snd->scheduled = 0;
     ma_sound_stop(&snd->sound);
-    // Seek back to beginning
+    ma_sound_set_start_time_in_pcm_frames(&snd->sound, 0);
     dj_seek(sound, 0.0f);
+    fprintf(stderr, "[dj_stop] is_playing=%d\n", ma_sound_is_playing(&snd->sound));
     return 0;
 }
 
@@ -530,7 +549,11 @@ float dj_get_duration(void* sound) {
 int dj_is_playing(void* sound) {
     if (!sound) return 0;
     DJSound* snd = (DJSound*)sound;
-    return ma_sound_is_playing(&snd->sound) ? 1 : 0;
+    if (ma_sound_is_playing(&snd->sound)) {
+        snd->scheduled = 0; // clear flag once actually playing
+        return 1;
+    }
+    return snd->scheduled ? 1 : 0;
 }
 
 void dj_set_volume(void* sound, float volume) {
@@ -597,14 +620,18 @@ int dj_schedule_sync_play(void* target_sound, float target_seconds,
     ma_sound_get_cursor_in_seconds(&source->sound, &source_pos);
 
     float seconds_until_trigger = source_seconds - source_pos;
-    if (seconds_until_trigger < 0) {
-        dj_seek(target_sound, target_seconds);
-        return dj_play(target_sound);
-    }
-
-    ma_uint64 frames_until_trigger = (ma_uint64)(seconds_until_trigger * (float)sample_rate);
     ma_uint64 engine_time = ma_engine_get_time_in_pcm_frames(engine);
-    ma_uint64 start_time = engine_time + frames_until_trigger;
+    ma_uint64 start_time;
+
+    if (seconds_until_trigger <= 0) {
+        // Already past trigger — start immediately, adjust target to compensate
+        float overshoot = -seconds_until_trigger;
+        target_seconds += overshoot;
+        start_time = engine_time; // start at next audio callback (sample-accurate)
+    } else {
+        ma_uint64 frames_until_trigger = (ma_uint64)(seconds_until_trigger * (float)sample_rate);
+        start_time = engine_time + frames_until_trigger;
+    }
 
     // Match tempo: if both tracks have BPM info, adjust target tempo
     if (source->original_bpm > 0 && target->original_bpm > 0) {
@@ -617,6 +644,102 @@ int dj_schedule_sync_play(void* target_sound, float target_seconds,
     ma_sound_seek_to_pcm_frame(&target->sound, target_frame);
     ma_sound_set_start_time_in_pcm_frames(&target->sound, start_time);
     ma_sound_start(&target->sound);
+
+    return 0;
+}
+
+int dj_sync_start(void* target_sound, float target_beat,
+                   void* source_sound, float source_beat, float bar_duration,
+                   int preserve_transport) {
+    if (!target_sound || !source_sound) {
+        fprintf(stderr, "[sync_start] ERROR: null sound pointer\n");
+        return -1;
+    }
+    DJSound* target = (DJSound*)target_sound;
+    DJSound* source = (DJSound*)source_sound;
+
+    // Reset target
+    ma_sound_stop(&target->sound);
+    ma_sound_set_start_time_in_pcm_frames(&target->sound, 0);
+    target->scheduled = 0;
+
+    ma_engine* engine = &source->engine->engine;
+    ma_uint32 sample_rate = ma_engine_get_sample_rate(engine);
+
+    // Match tempo
+    if (source->original_bpm > 0 && target->original_bpm > 0) {
+        float source_effective_bpm = source->original_bpm * dj_get_tempo(source_sound);
+        float ratio = source_effective_bpm / target->original_bpm;
+        dj_set_tempo(target_sound, ratio);
+    }
+
+    // Step 1: Calculate synced target position and start playing muted
+    float source_pos = 0.0f;
+    ma_sound_get_cursor_in_seconds(&source->sound, &source_pos);
+    float offset = source_pos - source_beat;
+    float phase = (bar_duration > 0 && offset > 0)
+        ? fmodf(offset, bar_duration) : 0;
+    float target_offset = preserve_transport ? fmaxf(offset, 0.0f) : phase;
+    float target_pos = target_beat + target_offset;
+    float target_duration = dj_get_duration(target_sound);
+    if (target_duration > 0.0f && target_pos > target_duration) {
+        target_pos = target_duration;
+    }
+    dj_seek(target_sound, target_pos);
+    ma_sound_set_volume(&target->sound, 0.0f);
+    ma_result start_result = ma_sound_start(&target->sound);
+    if (start_result != MA_SUCCESS) {
+        ma_sound_set_volume(&target->sound, target->volume);
+        fprintf(stderr, "[sync_start] ERROR: ma_sound_start failed (%d)\n", start_result);
+        return -1;
+    }
+
+    // Step 2: Wait for Rubber Band to stabilize
+    ma_uint64 wait_start = ma_engine_get_time_in_pcm_frames(engine);
+    ma_uint64 wait_frames = sample_rate / 10; // 100ms
+    while (ma_engine_get_time_in_pcm_frames(engine) < wait_start + wait_frames) {
+        ma_yield();
+    }
+
+    // Step 3: Measure exact phase error
+    float src_after = 0.0f, tgt_after = 0.0f;
+    ma_sound_get_cursor_in_seconds(&source->sound, &src_after);
+    ma_sound_get_cursor_in_seconds(&target->sound, &tgt_after);
+
+    float src_phase = fmodf(src_after - source_beat, bar_duration);
+    float tgt_phase = fmodf(tgt_after - target_beat, bar_duration);
+    if (src_phase < 0) src_phase += bar_duration;
+    if (tgt_phase < 0) tgt_phase += bar_duration;
+
+    float phase_error = src_phase - tgt_phase;
+    if (phase_error > bar_duration / 2) phase_error -= bar_duration;
+    if (phase_error < -bar_duration / 2) phase_error += bar_duration;
+
+    fprintf(stderr, "[sync_start] src=%.4f tgt=%.4f err=%.2fms\n",
+            src_after, tgt_after, phase_error * 1000);
+
+    // Step 4: Apply correction to read_cursor (no rb_reset — keeps it warmed up).
+    // The correction propagates smoothly through RB's buffer (~30ms transition).
+    if (fabsf(phase_error) > 0.0001f) {
+        int correction = (int)(phase_error * (float)sample_rate / target->source->time_ratio);
+        ma_int64 corrected = (ma_int64)target->source->read_cursor + correction;
+        if (corrected < 0) corrected = 0;
+        if ((ma_uint64)corrected > target->source->total_frames) {
+            corrected = (ma_int64)target->source->total_frames;
+        }
+        target->source->read_cursor = (ma_uint64)corrected;
+        fprintf(stderr, "[sync_start] corrected by %d frames (%.1fms)\n",
+                correction, phase_error * 1000);
+    }
+
+    // Step 5: Unmute
+    ma_sound_set_volume(&target->sound, target->volume);
+
+    // Verify
+    ma_sound_get_cursor_in_seconds(&source->sound, &src_after);
+    ma_sound_get_cursor_in_seconds(&target->sound, &tgt_after);
+    fprintf(stderr, "[sync_start] AFTER src=%.4f tgt=%.4f diff=%.2fms\n",
+            src_after, tgt_after, (tgt_after - src_after) * 1000);
 
     return 0;
 }

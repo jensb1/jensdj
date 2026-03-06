@@ -9,6 +9,7 @@ import { OutputSelector } from "../mixer/OutputSelector.tsx";
 import { CueToolbar } from "./CueToolbar.tsx";
 import { useCueStore } from "../../stores/cueStore.ts";
 import type { Peaks3Band, CuePoint } from "../../../shared/types.ts";
+import { debugLog } from "../../lib/debugLog.ts";
 
 interface TrackRowProps {
   trackId: string;
@@ -116,6 +117,16 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
     return () => window.removeEventListener("dj:playbackTick", handler);
   }, [trackId]);
 
+  useEffect(() => {
+    debugLog("trackRow.state", {
+      trackId,
+      isPlaying: state.isPlaying,
+      previewPosition: state.previewPosition,
+      lockedPosition: state.lockedPosition,
+      storePosition: Number(state.position.toFixed(3)),
+    });
+  }, [trackId, state.isPlaying, state.previewPosition, state.lockedPosition, state.position]);
+
   const handleRemove = useCallback(async () => {
     await window.djRpc?.request?.unloadTrack?.({ trackId });
     removeTrack(trackId);
@@ -134,20 +145,30 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
 
   const handlePreview = useCallback(
     (seconds: number | null) => {
+      debugLog("trackRow.preview", {
+        trackId,
+        seconds,
+        isPlaying: state.isPlaying,
+      });
       setPreviewPosition(trackId, seconds);
       // Also lock zoomed waveform to preview position
       if (seconds !== null) {
         setLockedPosition(trackId, seconds);
       }
     },
-    [trackId, setPreviewPosition, setLockedPosition]
+    [trackId, setPreviewPosition, setLockedPosition, state.isPlaying]
   );
 
   const handleLockedPositionChange = useCallback(
     (pos: number) => {
+      debugLog("trackRow.lockedPositionChange", {
+        trackId,
+        pos,
+        isPlaying: state.isPlaying,
+      });
       setLockedPosition(trackId, pos);
     },
-    [trackId, setLockedPosition]
+    [trackId, setLockedPosition, state.isPlaying]
   );
 
   // Space = lock at current preview, Esc = unlock

@@ -24,6 +24,7 @@ import {
   djSetOriginalBpm,
   djGetOriginalBpm,
   djScheduleSyncPlay,
+  djSyncStart,
   djCancelScheduledStart,
   djSetLoop,
   djClearLoop,
@@ -319,6 +320,30 @@ export class AudioEngine {
     );
     console.log(
       `[AudioEngine] scheduleSyncPlay: ${sourceTrackId}@${sourceBeatSeconds.toFixed(2)}s → ${targetTrackId}@${targetBeatSeconds.toFixed(2)}s = ${result === 0 ? "OK" : "FAIL"}`
+    );
+    return result === 0;
+  }
+
+  syncStart(
+    targetTrackId: string,
+    targetBeat: number,
+    sourceTrackId: string,
+    sourceBeat: number,
+    barDuration: number,
+    preserveTransport = false
+  ): boolean {
+    const target = this.tracks.get(targetTrackId);
+    const source = this.tracks.get(sourceTrackId);
+    if (!target || !source) return false;
+
+    const result = djSyncStart(
+      target.soundPtr, targetBeat,
+      source.soundPtr, sourceBeat,
+      barDuration,
+      preserveTransport
+    );
+    console.log(
+      `[AudioEngine] syncStart: ${sourceTrackId}@beat${sourceBeat.toFixed(2)}s → ${targetTrackId}@beat${targetBeat.toFixed(2)}s bar=${barDuration.toFixed(3)}s = ${result === 0 ? "OK" : "FAIL"}`
     );
     return result === 0;
   }

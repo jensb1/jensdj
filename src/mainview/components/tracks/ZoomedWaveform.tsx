@@ -1,5 +1,6 @@
 import { useRef, useEffect, useCallback, useState } from "react";
 import type { Peaks3Band, CuePoint } from "../../../shared/types.ts";
+import { debugLog, debugLogThrottled } from "../../lib/debugLog.ts";
 
 interface ZoomedWaveformProps {
   trackId: string;
@@ -20,6 +21,7 @@ export function ZoomedWaveform({
 }: ZoomedWaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number>(0);
+  const drawTimeoutRef = useRef<number>(0);
   const playbackPosition = useRef(0);
   const viewPosition = useRef(0);
   const loopRegion = useRef<{ start: number; end: number } | null>(null);
@@ -233,6 +235,25 @@ export function ZoomedWaveform({
     draw(canvas, viewPosition.current, playbackPosition.current);
   }, [draw]);
 
+  const flushWaveformDraw = useCallback(() => {
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = 0;
+    }
+    if (drawTimeoutRef.current) {
+      clearTimeout(drawTimeoutRef.current);
+      drawTimeoutRef.current = 0;
+    }
+    debugLogThrottled(`zoomedWaveform.draw:${trackId}`, 1000, "zoomedWaveform.drawFrame", {
+      trackId,
+      isPlaying,
+      isLocked,
+      playbackPosition: Number(playbackPosition.current.toFixed(3)),
+      viewPosition: Number(viewPosition.current.toFixed(3)),
+    });
+    redraw();
+  }, [trackId, isPlaying, isLocked, redraw]);
+
   // Resize
   useEffect(() => {
     redraw();
@@ -245,6 +266,13 @@ export function ZoomedWaveform({
 
   // Update view position when lock changes
   useEffect(() => {
+    debugLog("zoomedWaveform.lockState", {
+      trackId,
+      isPlaying,
+      lockedPosition,
+      playbackPosition: Number(playbackPosition.current.toFixed(3)),
+      viewPosition: Number(viewPosition.current.toFixed(3)),
+    });
     if (lockedPosition != null) {
       viewPosition.current = lockedPosition;
     } else {
@@ -253,6 +281,17 @@ export function ZoomedWaveform({
     }
     redraw();
   }, [lockedPosition, redraw]);
+
+  useEffect(() => {
+    debugLog("zoomedWaveform.playStateRedraw", {
+      trackId,
+      isPlaying,
+      isLocked,
+      playbackPosition: Number(playbackPosition.current.toFixed(3)),
+      viewPosition: Number(viewPosition.current.toFixed(3)),
+    });
+    flushWaveformDraw();
+  }, [trackId, isPlaying, isLocked, flushWaveformDraw]);
 
   // Listen for playback ticks
   useEffect(() => {
@@ -269,20 +308,33 @@ export function ZoomedWaveform({
         viewPosition.current = position;
       }
 
+      debugLogThrottled(`zoomedWaveform.tick:${trackId}`, 1000, "zoomedWaveform.tick", {
+        trackId,
+        isPlaying,
+        isLocked,
+        position: Number(position.toFixed(3)),
+        viewPosition: Number(viewPosition.current.toFixed(3)),
+        lockedPosition,
+        loopStart: loopStart != null ? Number(loopStart.toFixed(3)) : null,
+        loopEnd: loopEnd != null ? Number(loopEnd.toFixed(3)) : null,
+      });
+
       if (!animFrameRef.current) {
         animFrameRef.current = requestAnimationFrame(() => {
-          const canvas = canvasRef.current;
-          if (canvas) draw(canvas, viewPosition.current, playbackPosition.current);
-          animFrameRef.current = 0;
+          flushWaveformDraw();
         });
+        drawTimeoutRef.current = window.setTimeout(() => {
+          flushWaveformDraw();
+        }, 34);
       }
     };
     window.addEventListener("dj:playbackTick", handler);
     return () => {
       window.removeEventListener("dj:playbackTick", handler);
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+      if (drawTimeoutRef.current) clearTimeout(drawTimeoutRef.current);
     };
-  }, [trackId, draw, isLocked]);
+  }, [trackId, flushWaveformDraw, isLocked, isPlaying, lockedPosition]);
 
   // Drag to scrub — works when paused OR locked
   const [hoverInfo, setHoverInfo] = useState<string | null>(null);
@@ -296,6 +348,13 @@ export function ZoomedWaveform({
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       if (!canDrag) return;
       isDragging.current = true;
+      debugLog("zoomedWaveform.mouseDown", {
+        trackId,
+        canDrag,
+        isLocked,
+        isPlaying,
+        viewPosition: Number(viewPosition.current.toFixed(3)),
+      });
       dragStartX.current = e.clientX;
       dragStartPos.current = viewPosition.current;
       e.currentTarget.style.cursor = "grabbing";
@@ -330,6 +389,13 @@ export function ZoomedWaveform({
         } else {
           window.djRpc?.request?.seek?.({ trackId, seconds: newPos });
         }
+
+        debugLogThrottled(`zoomedWaveform.drag:${trackId}`, 250, "zoomedWaveform.drag", {
+          trackId,
+          newPos: Number(newPos.toFixed(3)),
+          isLocked,
+          isPlaying,
+        });
 
         const canvas = canvasRef.current;
         if (canvas) draw(canvas, newPos, playbackPosition.current);

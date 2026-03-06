@@ -1,7 +1,8 @@
-import { useCallback } from "react";
+import { useCallback, useEffect } from "react";
 import { usePlayerStore } from "../../stores/playerStore.ts";
 import { syncPlay } from "../../utils/syncPlay.ts";
 import { Button } from "../ui/button.tsx";
+import { debugLog } from "../../lib/debugLog.ts";
 
 interface PlaybackControlsProps {
   trackId: string;
@@ -11,18 +12,33 @@ interface PlaybackControlsProps {
 export function PlaybackControls({ trackId, isPlaying }: PlaybackControlsProps) {
   const setPlaying = usePlayerStore((s) => s.setPlaying);
 
-  const handlePlay = useCallback(() => syncPlay(trackId), [trackId]);
+  useEffect(() => {
+    debugLog("playbackControls.renderState", { trackId, isPlaying });
+  }, [trackId, isPlaying]);
+
+  const handlePlay = useCallback(async () => {
+    debugLog("playbackControls.playClick", { trackId, isPlaying });
+    await syncPlay(trackId);
+    const playbackState = await window.djRpc?.request?.getPlaybackState?.({ trackId });
+    debugLog("playbackControls.playAfter", { trackId, playbackState });
+  }, [trackId, isPlaying]);
 
   const handlePause = useCallback(async () => {
+    debugLog("playbackControls.pauseClick", { trackId, isPlaying });
     await window.djRpc?.request?.pause?.({ trackId });
     setPlaying(trackId, false);
-  }, [trackId, setPlaying]);
+    const playbackState = await window.djRpc?.request?.getPlaybackState?.({ trackId });
+    debugLog("playbackControls.pauseAfter", { trackId, playbackState });
+  }, [trackId, setPlaying, isPlaying]);
 
   const handleStop = useCallback(async () => {
+    debugLog("playbackControls.stopClick", { trackId, isPlaying });
     await window.djRpc?.request?.stop?.({ trackId });
     setPlaying(trackId, false);
     window.dispatchEvent(new CustomEvent("dj:connectionsReset"));
-  }, [trackId, setPlaying]);
+    const playbackState = await window.djRpc?.request?.getPlaybackState?.({ trackId });
+    debugLog("playbackControls.stopAfter", { trackId, playbackState });
+  }, [trackId, setPlaying, isPlaying]);
 
   return (
     <div className="flex items-center gap-0.5 shrink-0">

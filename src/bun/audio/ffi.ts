@@ -65,6 +65,10 @@ const lib = dlopen(libPath, {
     args: [FFIType.ptr, FFIType.f32, FFIType.ptr, FFIType.f32],
     returns: FFIType.i32,
   },
+  dj_sync_start: {
+    args: [FFIType.ptr, FFIType.f32, FFIType.ptr, FFIType.f32, FFIType.f32, FFIType.i32],
+    returns: FFIType.i32,
+  },
   dj_cancel_scheduled_start: {
     args: [FFIType.ptr],
     returns: FFIType.i32,
@@ -216,6 +220,23 @@ export const djScheduleSyncPlay = (
     targetSeconds,
     sourceSound as unknown as Pointer,
     sourceSeconds
+  );
+
+export const djSyncStart = (
+  targetSound: NativePtr,
+  targetBeat: number,
+  sourceSound: NativePtr,
+  sourceBeat: number,
+  barDuration: number,
+  preserveTransport: boolean
+): number =>
+  s.dj_sync_start(
+    targetSound as unknown as Pointer,
+    targetBeat,
+    sourceSound as unknown as Pointer,
+    sourceBeat,
+    barDuration,
+    preserveTransport ? 1 : 0
   );
 
 export const djCancelScheduledStart = (sound: NativePtr): number =>

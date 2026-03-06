@@ -125,6 +125,17 @@ export type MainViewRPC = {
         };
         response: boolean;
       };
+      syncStart: {
+        params: {
+          targetTrackId: string;
+          targetBeat: number;
+          sourceTrackId: string;
+          sourceBeat: number;
+          barDuration: number;
+          preserveTransport?: boolean;
+        };
+        response: boolean;
+      };
       cancelScheduledStart: {
         params: { trackId: string };
         response: void;
@@ -172,6 +183,7 @@ export type MainViewRPC = {
       playbackTick: {
         trackId: string;
         position: number;
+        isPlaying: boolean;
         level: number;
         loopStart?: number;
         loopEnd?: number;
