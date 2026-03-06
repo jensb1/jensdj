@@ -27,6 +27,7 @@ export function ZoomedWaveform({
   const playbackPosition = useRef(0);
   const viewPosition = useRef(0);
   const loopRegion = useRef<{ start: number; end: number } | null>(null);
+  const redrawRef = useRef<() => void>(() => {});
 
   const isLocked = lockedPosition != null;
 
@@ -256,6 +257,10 @@ export function ZoomedWaveform({
     draw(canvas, viewPosition.current, playbackPosition.current);
   }, [draw]);
 
+  useEffect(() => {
+    redrawRef.current = redraw;
+  }, [redraw]);
+
   const flushWaveformDraw = useCallback(() => {
     if (animFrameRef.current) {
       cancelAnimationFrame(animFrameRef.current);
@@ -292,8 +297,8 @@ export function ZoomedWaveform({
     } else if (!isPlaying) {
       viewPosition.current = position;
     }
-    redraw();
-  }, [position, lockedPosition, isPlaying, redraw]);
+    redrawRef.current();
+  }, [position, lockedPosition, isPlaying]);
 
   // Update view position when lock changes
   useEffect(() => {
