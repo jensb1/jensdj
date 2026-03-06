@@ -51,6 +51,7 @@ interface InternalTrack {
   soundPtr: NativePtr;
   deviceIndex: number;
   metadata: TrackMetadata;
+  firstBeat: number;
 }
 
 const NUM_PEAKS = 50000;
@@ -171,11 +172,13 @@ export class AudioEngine {
       soundPtr,
       deviceIndex,
       metadata: { ...metadata, duration },
+      firstBeat: 0,
     };
     this.tracks.set(id, track);
 
     const analysis = this.analyze(filePath);
     const firstBeat = analysis.beats[0];
+    track.firstBeat = firstBeat ?? 0;
     if (firstBeat !== undefined && Number.isFinite(firstBeat) && firstBeat > 0) {
       djSeek(soundPtr, firstBeat);
     }
@@ -245,6 +248,9 @@ export class AudioEngine {
     const track = this.tracks.get(trackId);
     if (!track) return;
     djStop(track.soundPtr);
+    if (track.firstBeat > 0) {
+      djSeek(track.soundPtr, track.firstBeat);
+    }
   }
 
   seek(trackId: string, seconds: number): void {

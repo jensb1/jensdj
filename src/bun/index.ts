@@ -1,4 +1,5 @@
 import { BrowserWindow } from "electrobun/bun";
+import { registerAutomationWebview, startAutomationServer } from "./automation.ts";
 import { createRPC, initEngine, startPlaybackTicker } from "./rpc.ts";
 
 // Initialize native audio engine
@@ -20,6 +21,9 @@ const win = new BrowserWindow({
   titleBarStyle: "default",
   rpc: mainViewRPC,
 });
+
+registerAutomationWebview(win.webview);
+startAutomationServer();
 
 // Start playback position ticker (60fps → webview)
 startPlaybackTicker(win.webview);

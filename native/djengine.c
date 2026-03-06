@@ -640,11 +640,31 @@ int dj_schedule_sync_play(void* target_sound, float target_seconds,
         dj_set_tempo(target_sound, ratio);
     }
 
-    ma_uint64 target_frame = (ma_uint64)(target_seconds * (float)sample_rate);
+    float target_seek_seconds = target_seconds;
+    if (target->source && target->source->rb) {
+        unsigned int start_delay_frames = rubberband_get_start_delay(target->source->rb);
+        float start_delay_seconds =
+            ((float)start_delay_frames / (float)sample_rate) * (float)target->source->time_ratio;
+        target_seek_seconds -= start_delay_seconds;
+        if (target_seek_seconds < 0.0f) {
+            target_seek_seconds = 0.0f;
+        }
+        fprintf(stderr,
+                "[schedule_sync] src=%.4f trigger=%.4f tgt=%.4f seek=%.4f rb_delay=%.2fms\n",
+                source_pos, source_seconds, target_seconds, target_seek_seconds,
+                start_delay_seconds * 1000.0f);
+    }
+
+    ma_uint64 target_frame = (ma_uint64)(target_seek_seconds * (float)sample_rate);
     ma_sound_seek_to_pcm_frame(&target->sound, target_frame);
     ma_sound_set_start_time_in_pcm_frames(&target->sound, start_time);
-    ma_sound_start(&target->sound);
+    ma_result start_result = ma_sound_start(&target->sound);
+    if (start_result != MA_SUCCESS) {
+        fprintf(stderr, "[schedule_sync] ERROR: ma_sound_start failed (%d)\n", start_result);
+        return -1;
+    }
 
+    target->scheduled = 1;
     return 0;
 }
 
@@ -677,11 +697,16 @@ int dj_sync_start(void* target_sound, float target_beat,
     float source_pos = 0.0f;
     ma_sound_get_cursor_in_seconds(&source->sound, &source_pos);
     float offset = source_pos - source_beat;
-    float phase = (bar_duration > 0 && offset > 0)
-        ? fmodf(offset, bar_duration) : 0;
+    float phase = 0.0f;
+    if (bar_duration > 0.0f) {
+        phase = fmodf(offset, bar_duration);
+    }
     float target_offset = preserve_transport ? fmaxf(offset, 0.0f) : phase;
     float target_pos = target_beat + target_offset;
     float target_duration = dj_get_duration(target_sound);
+    if (target_pos < 0.0f) {
+        target_pos = 0.0f;
+    }
     if (target_duration > 0.0f && target_pos > target_duration) {
         target_pos = target_duration;
     }

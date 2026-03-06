@@ -233,7 +233,7 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
   const currentPosition = positionRef.current;
 
   return (
-    <div className="border-b border-zinc-800/50 bg-zinc-900/30 hover:bg-zinc-900/60 transition-colors">
+    <div data-testid={`track-row-${trackId}`} className="border-b border-zinc-800/50 bg-zinc-900/30 hover:bg-zinc-900/60 transition-colors">
       {/* Top row: mixer square + zoomed waveform */}
       <div className="flex px-4 pt-2 gap-2">
         {/* Mixer square: EQ knobs + volume fader */}

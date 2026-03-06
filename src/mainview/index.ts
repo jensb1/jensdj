@@ -63,9 +63,102 @@ const electroview = new Electroview({ rpc });
 declare global {
   interface Window {
     djRpc: typeof electroview.rpc;
+    __jensdjAutomation: {
+      clickByTestId: (testId: string) => boolean;
+      getTrackIds: () => string[];
+      getPlaybackSnapshot: (trackIds?: string[]) => Promise<Record<string, {
+        storePosition: number;
+        storeIsPlaying: boolean;
+        backendPosition: number;
+        backendIsPlaying: boolean;
+        hasStartedPlayback: boolean;
+        previewPosition: number | null;
+        lockedPosition: number | null;
+      }>>;
+      getTrackContext: (trackIds?: string[]) => Promise<Record<string, {
+        backendPosition: number;
+        backendIsPlaying: boolean;
+        firstBeat: number;
+        beats: number[];
+      }>>;
+      sleep: (ms: number) => Promise<boolean>;
+    };
   }
 }
 window.djRpc = electroview.rpc;
+
+window.__jensdjAutomation = {
+  clickByTestId(testId: string) {
+    const target = Array.from(document.querySelectorAll<HTMLElement>("[data-testid]"))
+      .find((element) => element.dataset.testid === testId);
+    if (!target) {
+      throw new Error(`No element found for data-testid=${testId}`);
+    }
+    target.click();
+    return true;
+  },
+  getTrackIds() {
+    return Array.from(usePlayerStore.getState().tracks.keys());
+  },
+  async getPlaybackSnapshot(trackIds?: string[]) {
+    const tracks = usePlayerStore.getState().tracks;
+    const ids = trackIds && trackIds.length > 0 ? trackIds : Array.from(tracks.keys());
+    const snapshot: Record<string, {
+      storePosition: number;
+      storeIsPlaying: boolean;
+      backendPosition: number;
+      backendIsPlaying: boolean;
+      hasStartedPlayback: boolean;
+      previewPosition: number | null;
+      lockedPosition: number | null;
+    }> = {};
+
+    for (const trackId of ids) {
+      const storeTrack = tracks.get(trackId);
+      if (!storeTrack) continue;
+      const playbackState = await window.djRpc?.request?.getPlaybackState?.({ trackId });
+      snapshot[trackId] = {
+        storePosition: storeTrack.position,
+        storeIsPlaying: storeTrack.isPlaying,
+        backendPosition: playbackState?.position ?? 0,
+        backendIsPlaying: playbackState?.isPlaying ?? false,
+        hasStartedPlayback: storeTrack.hasStartedPlayback,
+        previewPosition: storeTrack.previewPosition,
+        lockedPosition: storeTrack.lockedPosition,
+      };
+    }
+
+    return snapshot;
+  },
+  async getTrackContext(trackIds?: string[]) {
+    const tracks = usePlayerStore.getState().tracks;
+    const ids = trackIds && trackIds.length > 0 ? trackIds : Array.from(tracks.keys());
+    const snapshot: Record<string, {
+      backendPosition: number;
+      backendIsPlaying: boolean;
+      firstBeat: number;
+      beats: number[];
+    }> = {};
+
+    for (const trackId of ids) {
+      const storeTrack = tracks.get(trackId);
+      if (!storeTrack) continue;
+      const playbackState = await window.djRpc?.request?.getPlaybackState?.({ trackId });
+      snapshot[trackId] = {
+        backendPosition: playbackState?.position ?? 0,
+        backendIsPlaying: playbackState?.isPlaying ?? false,
+        firstBeat: storeTrack.track.beats[0] ?? 0,
+        beats: storeTrack.track.beats,
+      };
+    }
+
+    return snapshot;
+  },
+  async sleep(ms: number) {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+    return true;
+  },
+};
 
 logInfo("rpc.ready", { hasRpc: !!window.djRpc });
 

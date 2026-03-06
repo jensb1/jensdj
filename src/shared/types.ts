@@ -175,6 +175,12 @@ export type MainViewRPC = {
     };
     messages: {
       logToBun: { msg: string };
+      automationResult: {
+        id: string;
+        ok: boolean;
+        result?: string;
+        error?: string;
+      };
     };
   }>;
   webview: RPCSchema<{

@@ -1,6 +1,9 @@
 import { usePlayerStore } from "../stores/playerStore.ts";
-import { buildSyncStartPlan } from "../../shared/syncPlan.ts";
+import { buildScheduledBeatSyncPlan, buildSyncStartPlan, getBarDuration } from "../../shared/syncPlan.ts";
 import { debugLog, logInfo } from "../lib/debugLog.ts";
+
+const IMMEDIATE_BEAT_SYNC_MIN_WINDOW_SEC = 0.15;
+const IMMEDIATE_BEAT_SYNC_MIN_PREROLL_SEC = 0.02;
 
 /**
  * Play a track, auto-syncing to any currently playing track.
@@ -68,8 +71,7 @@ export async function syncPlay(trackId: string): Promise<void> {
         thisTrack.lockedPosition ??
         thisTrack.previewPosition ??
         null;
-
-      const plan = buildSyncStartPlan({
+      const syncPlanInput = {
         source: {
           beats: sourceBeats,
           filePath: source.track.filePath,
@@ -81,7 +83,93 @@ export async function syncPlay(trackId: string): Promise<void> {
         sourcePos,
         targetPos,
         targetAnchorPos,
-      });
+        allowTransportPreserve: false,
+      };
+
+      const scheduledPlan = buildScheduledBeatSyncPlan(syncPlanInput);
+      if (scheduledPlan) {
+        const secondsUntilSourceBeat = scheduledPlan.sourceBeat - sourcePos;
+        const availableTargetPreroll = scheduledPlan.targetBeat - Math.max(secondsUntilSourceBeat, 0);
+        const immediateBeatSyncWindow = Math.max(
+          IMMEDIATE_BEAT_SYNC_MIN_WINDOW_SEC,
+          scheduledPlan.targetBeat - IMMEDIATE_BEAT_SYNC_MIN_PREROLL_SEC
+        );
+        const shouldUseImmediateBeatSync =
+          secondsUntilSourceBeat >= 0 &&
+          secondsUntilSourceBeat <= immediateBeatSyncWindow &&
+          availableTargetPreroll >= IMMEDIATE_BEAT_SYNC_MIN_PREROLL_SEC;
+        debugLog("syncPlay.schedulePlan", {
+          trackId,
+          sourceId,
+          sourcePos: Number(sourcePos.toFixed(3)),
+          targetPos: Number(targetPos.toFixed(3)),
+          targetAnchorPos: targetAnchorPos != null ? Number(targetAnchorPos.toFixed(3)) : null,
+          sourceBeat: Number(scheduledPlan.sourceBeat.toFixed(3)),
+          targetBeat: Number(scheduledPlan.targetBeat.toFixed(3)),
+          secondsUntilSourceBeat: Number(secondsUntilSourceBeat.toFixed(3)),
+          availableTargetPreroll: Number(availableTargetPreroll.toFixed(3)),
+          immediateBeatSyncWindow: Number(immediateBeatSyncWindow.toFixed(3)),
+          shouldUseImmediateBeatSync,
+        });
+
+        if (shouldUseImmediateBeatSync) {
+          const barDuration = getBarDuration(sourceBeats);
+          logInfo("sync.immediateBeat", {
+            trackId,
+            sourceId,
+            sourceBeat: Number(scheduledPlan.sourceBeat.toFixed(3)),
+            targetBeat: Number(scheduledPlan.targetBeat.toFixed(3)),
+            secondsUntilSourceBeat: Number(secondsUntilSourceBeat.toFixed(3)),
+          });
+
+          const ok = await window.djRpc?.request?.syncStart?.({
+            targetTrackId: trackId,
+            targetBeat: scheduledPlan.targetBeat,
+            sourceTrackId: sourceId,
+            sourceBeat: scheduledPlan.sourceBeat,
+            barDuration,
+            preserveTransport: false,
+          });
+          const playbackState = await window.djRpc?.request?.getPlaybackState?.({ trackId });
+          debugLog("syncPlay.immediateBeatResult", {
+            trackId,
+            ok,
+            playbackState,
+          });
+          if (ok) {
+            unlockVisualFollow();
+            store.setPlaying(trackId, true);
+            return;
+          }
+        } else {
+          logInfo("sync.scheduleBeat", {
+            trackId,
+            sourceId,
+            sourceBeat: Number(scheduledPlan.sourceBeat.toFixed(3)),
+            targetBeat: Number(scheduledPlan.targetBeat.toFixed(3)),
+          });
+
+          const ok = await window.djRpc?.request?.scheduleSyncPlay?.({
+            targetTrackId: trackId,
+            targetBeatSeconds: scheduledPlan.targetBeat,
+            sourceTrackId: sourceId,
+            sourceBeatSeconds: scheduledPlan.sourceBeat,
+          });
+          const playbackState = await window.djRpc?.request?.getPlaybackState?.({ trackId });
+          debugLog("syncPlay.scheduleSyncResult", {
+            trackId,
+            ok,
+            playbackState,
+          });
+          if (ok) {
+            unlockVisualFollow();
+            store.setPlaying(trackId, true);
+            return;
+          }
+        }
+      }
+
+      const plan = buildSyncStartPlan(syncPlanInput);
       if (plan) {
         debugLog("syncPlay.plan", {
           trackId,
@@ -89,6 +177,7 @@ export async function syncPlay(trackId: string): Promise<void> {
           sourcePos: Number(sourcePos.toFixed(3)),
           targetPos: Number(targetPos.toFixed(3)),
           targetAnchorPos: targetAnchorPos != null ? Number(targetAnchorPos.toFixed(3)) : null,
+          hasStartedPlayback: thisTrack.hasStartedPlayback,
           sourceBeat: Number(plan.sourceBeat.toFixed(3)),
           targetBeat: Number(plan.targetBeat.toFixed(3)),
           barDuration: Number(plan.barDuration.toFixed(3)),
@@ -98,6 +187,7 @@ export async function syncPlay(trackId: string): Promise<void> {
           trackId,
           sourceId,
           targetAnchorPos: targetAnchorPos != null ? Number(targetAnchorPos.toFixed(3)) : null,
+          hasStartedPlayback: thisTrack.hasStartedPlayback,
           targetBeat: Number(plan.targetBeat.toFixed(3)),
           preserveTransport: plan.preserveTransport,
         });

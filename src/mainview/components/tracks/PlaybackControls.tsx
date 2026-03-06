@@ -40,15 +40,15 @@ export function PlaybackControls({ trackId, isPlaying }: PlaybackControlsProps) 
   return (
     <div className="flex items-center gap-0.5 shrink-0">
       {isPlaying ? (
-        <Button variant="ghost" size="icon" onClick={handlePause} className="text-emerald-400 hover:text-emerald-300">
+        <Button data-testid={`track-${trackId}-pause`} variant="ghost" size="icon" onClick={handlePause} className="text-emerald-400 hover:text-emerald-300">
           ⏸
         </Button>
       ) : (
-        <Button variant="ghost" size="icon" onClick={handlePlay} className="text-zinc-300 hover:text-white">
+        <Button data-testid={`track-${trackId}-play`} variant="ghost" size="icon" onClick={handlePlay} className="text-zinc-300 hover:text-white">
           ▶
         </Button>
       )}
-      <Button variant="ghost" size="icon" onClick={handleStop} className="text-zinc-500 hover:text-zinc-300">
+      <Button data-testid={`track-${trackId}-stop`} variant="ghost" size="icon" onClick={handleStop} className="text-zinc-500 hover:text-zinc-300">
         ⏹
       </Button>
     </div>

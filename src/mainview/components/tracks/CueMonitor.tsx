@@ -1,29 +1,41 @@
 import { useEffect, useRef } from "react";
 import { useCueStore } from "../../stores/cueStore.ts";
 import { usePlayerStore } from "../../stores/playerStore.ts";
-import { syncPlay } from "../../utils/syncPlay.ts";
+import { logInfo } from "../../lib/debugLog.ts";
+import { startConnectedCue } from "../../utils/cueActions.ts";
+import { hasCrossedCue, shouldRearmCue } from "../../utils/cueTrigger.ts";
 
 /**
  * Watches playback position and triggers cue connection actions:
- * - start: start the connected track (synced to downbeat)
+ * - start: start the connected track synced cue-to-cue
  * - stop: stop this track
  * - loop: set a 4-bar loop on the connected track
  */
 export function CueMonitor() {
   const cues = useCueStore((s) => s.cues);
   const firedCues = useRef<Set<string>>(new Set());
+  const lastPositions = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
     const handler = (e: Event) => {
-      const { trackId, position } = (e as CustomEvent).detail;
+      const { trackId, position, isPlaying } = (e as CustomEvent).detail as {
+        trackId: string;
+        position: number;
+        isPlaying?: boolean;
+      };
+      const previousPosition = lastPositions.current.get(trackId);
+      lastPositions.current.set(trackId, position);
 
       for (const [, cue] of cues) {
         if (cue.trackId !== trackId) continue;
         if (!cue.connectedCueId) continue;
+        if (shouldRearmCue(position, cue.time)) {
+          firedCues.current.delete(cue.id);
+        }
+        if (!isPlaying) continue;
         if (firedCues.current.has(cue.id)) continue;
 
-        // Trigger when playback is within 50ms of the cue
-        if (Math.abs(position - cue.time) > 0.05) continue;
+        if (!hasCrossedCue(previousPosition, position, cue.time)) continue;
 
         const connectedCue = cues.get(cue.connectedCueId);
         if (!connectedCue) continue;
@@ -32,16 +44,22 @@ export function CueMonitor() {
         const action = cue.connectionAction ?? "start";
         const targetTrackId = connectedCue.trackId;
 
-        console.log(`[CueMonitor] ${cue.label}@${cue.time.toFixed(2)}s → ${connectedCue.label} action=${action}`);
+        logInfo("cue.monitorTrigger", {
+          sourceTrackId: trackId,
+          cueId: cue.id,
+          cueLabel: cue.label,
+          cueTime: Number(cue.time.toFixed(3)),
+          targetTrackId,
+          targetCueId: connectedCue.id,
+          targetCueTime: Number(connectedCue.time.toFixed(3)),
+          action,
+          position: Number(position.toFixed(3)),
+          previousPosition: previousPosition != null ? Number(previousPosition.toFixed(3)) : null,
+        });
 
         switch (action) {
           case "start": {
-            const targetState = usePlayerStore.getState().tracks.get(targetTrackId);
-            if (targetState && !targetState.isPlaying) {
-              // Seek to connected cue's position first, then sync play
-              window.djRpc?.request?.seek?.({ trackId: targetTrackId, seconds: connectedCue.time });
-              syncPlay(targetTrackId);
-            }
+            void startConnectedCue(trackId, cue, connectedCue);
             break;
           }
           case "stop": {
@@ -71,7 +89,10 @@ export function CueMonitor() {
 
   // Reset fired cues when tracks stop
   useEffect(() => {
-    const handler = () => { firedCues.current.clear(); };
+    const handler = () => {
+      firedCues.current.clear();
+      lastPositions.current.clear();
+    };
     window.addEventListener("dj:connectionsReset", handler);
     return () => window.removeEventListener("dj:connectionsReset", handler);
   }, []);

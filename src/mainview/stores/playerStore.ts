@@ -6,6 +6,7 @@ export interface TrackState {
   track: LoadedTrack;
   position: number;
   isPlaying: boolean;
+  hasStartedPlayback: boolean;
   volume: number;
   deviceId: number;
   previewPosition: number | null;
@@ -54,6 +55,7 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
         track,
         position: initialPosition,
         isPlaying: false,
+        hasStartedPlayback: false,
         volume: 1,
         deviceId: -1,
         previewPosition: null,
@@ -90,11 +92,16 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
         trackId,
         from: existing.isPlaying,
         to: isPlaying,
+        hasStartedPlayback: existing.hasStartedPlayback,
         lockedPosition: existing.lockedPosition,
         previewPosition: existing.previewPosition,
       });
       const tracks = new Map(state.tracks);
-      tracks.set(trackId, { ...existing, isPlaying });
+      tracks.set(trackId, {
+        ...existing,
+        isPlaying,
+        hasStartedPlayback: existing.hasStartedPlayback || isPlaying,
+      });
       return { tracks };
     }),
 

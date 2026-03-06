@@ -2,6 +2,7 @@ import { BrowserView } from "electrobun/bun";
 import type { MainViewRPC } from "../shared/types.ts";
 import { AudioEngine } from "./audio/engine.ts";
 import { initDB } from "./library/db.ts";
+import { handleAutomationResult } from "./automation.ts";
 import { createRpcRequestHandlers } from "./rpcCore.ts";
 
 const engine = new AudioEngine();
@@ -29,6 +30,9 @@ export function createRPC() {
       messages: {
         logToBun: ({ msg }) => {
           console.log("[WebView]", msg);
+        },
+        automationResult: (payload) => {
+          handleAutomationResult(payload);
         },
       },
     },

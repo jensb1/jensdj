@@ -9,6 +9,7 @@ export interface SyncPlanInput {
   sourcePos: number;
   targetPos: number;
   targetAnchorPos?: number | null;
+  allowTransportPreserve?: boolean;
 }
 
 export interface SyncStartPlan {
@@ -17,6 +18,19 @@ export interface SyncStartPlan {
   barDuration: number;
   preserveTransport: boolean;
 }
+
+export interface CueSyncStartPlanInput {
+  source: SyncPlanTrack;
+  sourceCueTime: number;
+  targetCueTime: number;
+}
+
+export interface ScheduledSyncPlan {
+  sourceBeat: number;
+  targetBeat: number;
+}
+
+const BEAT_SNAP_WINDOW_SEC = 0.12;
 
 function normalizePhase(offset: number, barDuration: number): number {
   if (barDuration <= 0) return 0;
@@ -44,6 +58,44 @@ export function findNearestDownbeat(beats: number[], position: number): number {
     }
   }
   return best;
+}
+
+export function findNearestBeat(beats: number[], position: number): { beat: number; index: number } {
+  let bestBeat = beats[0] ?? 0;
+  let bestIndex = 0;
+  let minDist = Infinity;
+  for (let i = 0; i < beats.length; i++) {
+    const beat = beats[i] ?? 0;
+    const dist = Math.abs(beat - position);
+    if (dist < minDist) {
+      minDist = dist;
+      bestBeat = beat;
+      bestIndex = i;
+    }
+  }
+  return { beat: bestBeat, index: bestIndex };
+}
+
+export function findNearestPhaseMatchedBeat(
+  beats: number[],
+  position: number,
+  phaseIndex: number
+): { beat: number; index: number } {
+  let bestBeat = beats[phaseIndex] ?? beats[0] ?? 0;
+  let bestIndex = phaseIndex;
+  let minDist = Infinity;
+
+  for (let i = phaseIndex; i < beats.length; i += 4) {
+    const beat = beats[i] ?? 0;
+    const dist = Math.abs(beat - position);
+    if (dist < minDist) {
+      minDist = dist;
+      bestBeat = beat;
+      bestIndex = i;
+    }
+  }
+
+  return { beat: bestBeat, index: bestIndex };
 }
 
 export function findCurrentDownbeat(beats: number[], position: number): number {
@@ -124,6 +176,7 @@ export function buildSyncStartPlan(input: SyncPlanInput): SyncStartPlan | null {
   const sourcePhase = normalizePhase(sourcePos - sourceBeat, barDuration);
   const firstTargetBeat = target.beats[0] ?? 0;
   const preserveTransport =
+    input.allowTransportPreserve !== false &&
     source.filePath === target.filePath &&
     targetStartPos <= firstTargetBeat + 0.1;
 
@@ -134,5 +187,35 @@ export function buildSyncStartPlan(input: SyncPlanInput): SyncStartPlan | null {
       : findPhaseAlignedDownbeat(target.beats, targetStartPos, sourcePhase),
     barDuration,
     preserveTransport,
+  };
+}
+
+export function buildCueSyncStartPlan(input: CueSyncStartPlanInput): SyncStartPlan | null {
+  const { source, sourceCueTime, targetCueTime } = input;
+  if (!Number.isFinite(sourceCueTime) || !Number.isFinite(targetCueTime)) return null;
+
+  return {
+    sourceBeat: sourceCueTime,
+    targetBeat: targetCueTime,
+    barDuration: getBarDuration(source.beats),
+    preserveTransport: false,
+  };
+}
+
+export function buildScheduledBeatSyncPlan(input: SyncPlanInput): ScheduledSyncPlan | null {
+  const { source, target, sourcePos } = input;
+  if (source.beats.length < 5 || target.beats.length < 5) return null;
+
+  const targetStartPos = resolveTargetStartPosition(input);
+  const targetBeatMatch = findNearestBeat(target.beats, targetStartPos);
+  if (Math.abs(targetBeatMatch.beat - targetStartPos) > BEAT_SNAP_WINDOW_SEC) {
+    return null;
+  }
+  const phaseIndex = targetBeatMatch.index % 4;
+  const sourceBeatMatch = findNearestPhaseMatchedBeat(source.beats, sourcePos, phaseIndex);
+
+  return {
+    sourceBeat: sourceBeatMatch.beat,
+    targetBeat: targetBeatMatch.beat,
   };
 }
