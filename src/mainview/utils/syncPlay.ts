@@ -1,6 +1,6 @@
 import { usePlayerStore } from "../stores/playerStore.ts";
 import { buildSyncStartPlan } from "../../shared/syncPlan.ts";
-import { debugLog } from "../lib/debugLog.ts";
+import { debugLog, logInfo } from "../lib/debugLog.ts";
 
 /**
  * Play a track, auto-syncing to any currently playing track.
@@ -94,6 +94,13 @@ export async function syncPlay(trackId: string): Promise<void> {
           barDuration: Number(plan.barDuration.toFixed(3)),
           preserveTransport: plan.preserveTransport,
         });
+        logInfo("sync.plan", {
+          trackId,
+          sourceId,
+          targetAnchorPos: targetAnchorPos != null ? Number(targetAnchorPos.toFixed(3)) : null,
+          targetBeat: Number(plan.targetBeat.toFixed(3)),
+          preserveTransport: plan.preserveTransport,
+        });
 
         const ok = await window.djRpc?.request?.syncStart?.({
           targetTrackId: trackId,
@@ -110,6 +117,11 @@ export async function syncPlay(trackId: string): Promise<void> {
           playbackState,
         });
         if (ok) {
+          logInfo("sync.start", {
+            trackId,
+            sourceId,
+            playbackState,
+          });
           unlockVisualFollow();
           store.setPlaying(trackId, true);
           return;
@@ -125,6 +137,7 @@ export async function syncPlay(trackId: string): Promise<void> {
     trackId,
     playbackState,
   });
+  logInfo("playback.fallbackPlay", { trackId, playbackState });
   unlockVisualFollow();
   store.setPlaying(trackId, true);
 }

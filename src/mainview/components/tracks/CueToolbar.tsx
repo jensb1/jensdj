@@ -1,6 +1,7 @@
 import { useMemo } from "react";
 import { useCueStore } from "../../stores/cueStore.ts";
 import type { CuePoint } from "../../../shared/types.ts";
+import { activateCue } from "../../utils/cueActions.ts";
 
 interface CueToolbarProps {
   trackId: string;
@@ -45,10 +46,6 @@ export function CueToolbar({ trackId, getPosition, beats }: CueToolbarProps) {
     addCue(trackId, time);
   };
 
-  const handleJumpTo = (cue: CuePoint) => {
-    window.djRpc?.request?.seek?.({ trackId, seconds: cue.time });
-  };
-
   return (
     <div className="flex items-center gap-1">
       <button
@@ -64,10 +61,18 @@ export function CueToolbar({ trackId, getPosition, beats }: CueToolbarProps) {
               isPendingTarget ? "ring-1 ring-amber-400 animate-pulse" : ""
             }`}
             style={{ backgroundColor: cue.color + "20", color: cue.color }}
-            onClick={() => isPendingTarget ? completeConnection(cue.id) : handleJumpTo(cue)}
+            onClick={() => {
+              if (isPendingTarget) {
+                completeConnection(cue.id);
+                return;
+              }
+              void activateCue(trackId, cue);
+            }}
             title={isPendingTarget
               ? `Click to connect ${pendingSource!.label} → ${cue.label}`
-              : `${cue.label} @ ${cue.time.toFixed(2)}s — click to jump`
+              : cue.connectedCueId
+                ? `${cue.label} @ ${cue.time.toFixed(2)}s — click to jump to connected cue`
+                : `${cue.label} @ ${cue.time.toFixed(2)}s — click to jump`
             }
           >
             {cue.label}

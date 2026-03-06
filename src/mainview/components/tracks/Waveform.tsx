@@ -14,10 +14,11 @@ interface WaveformProps {
   cues?: CuePoint[];
   onSeek: (seconds: number) => void;
   onPreview?: (seconds: number | null) => void;
+  onPlayFromPreview?: (seconds: number) => void;
   onContainerRef?: (el: HTMLDivElement | null) => void;
 }
 
-export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, isPlaying = false, previewPosition, cues, onSeek, onPreview, onContainerRef }: WaveformProps) {
+export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, isPlaying = false, previewPosition, cues, onSeek, onPreview, onPlayFromPreview, onContainerRef }: WaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
@@ -328,6 +329,10 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
     [timeFromX, isPlaying, onSeek, onPreview]
   );
 
+  const previewPercent = previewPosition != null && duration > 0
+    ? Math.max(0, Math.min(100, (previewPosition / duration) * 100))
+    : null;
+
   return (
     <div
       ref={(el) => {
@@ -339,13 +344,29 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
     >
       <canvas ref={canvasRef} className="absolute inset-0 w-full h-full" />
       <canvas ref={overlayRef} className="absolute inset-0 w-full h-full" />
+      {previewPosition != null && onPlayFromPreview && (
+        <button
+          type="button"
+          className="absolute -top-5 z-20 rounded bg-amber-400 px-1.5 py-px text-[8px] font-bold text-black shadow"
+          style={{
+            left: `${previewPercent}%`,
+            transform: "translateX(-50%)",
+          }}
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            onPlayFromPreview(previewPosition);
+          }}
+        >
+          Play here
+        </button>
+      )}
       {cues && cues.length > 0 && (
         <CueMarkers
           cues={cues}
           duration={duration}
           containerWidth={containerRef.current?.getBoundingClientRect().width ?? 0}
           trackId={trackId}
-          onGoto={onSeek}
         />
       )}
       {peaks.low.length === 0 && (

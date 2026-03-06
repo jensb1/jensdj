@@ -4,6 +4,7 @@ import { LibraryPanel } from "../library/LibraryPanel.tsx";
 import { usePlayerStore } from "../../stores/playerStore.ts";
 import { syncPlay } from "../../utils/syncPlay.ts";
 import { Button } from "../ui/button.tsx";
+import { logError, logInfo, logWarn } from "../../lib/debugLog.ts";
 
 function MasterTempo() {
   const masterBpm = usePlayerStore((s) => s.masterBpm);
@@ -100,9 +101,9 @@ export function MainLayout() {
         if (t1) addTrack(t1);
         const t2 = await window.djRpc?.request?.loadTrack?.({ filePath: testPath });
         if (t2) addTrack(t2);
-        console.log("[UI] Auto-loaded 2 test tracks");
+        logInfo("library.autoLoad", { count: 2, filePath: testPath });
       } catch (e) {
-        console.warn("[UI] Auto-load failed:", e);
+        logWarn("library.autoLoadFailed", { error: String(e) });
       }
     };
     autoLoad();
@@ -119,7 +120,7 @@ export function MainLayout() {
         }
       }
     } catch (e) {
-      console.error("[UI] Failed to load track:", e);
+      logError("library.loadTrackFailed", { error: String(e) });
     }
     setLoading(false);
   };
@@ -137,7 +138,7 @@ export function MainLayout() {
         if (pathInputRef.current) pathInputRef.current.value = "";
       }
     } catch (e) {
-      console.error("[UI] Load failed:", e);
+      logError("library.loadPathFailed", { error: String(e), filePath });
     }
     setLoading(false);
   };
@@ -149,7 +150,7 @@ export function MainLayout() {
       const track = await window.djRpc?.request?.loadTrack?.({ filePath });
       if (track) addTrack(track);
     } catch (e) {
-      console.error("[UI] Test load failed:", e);
+      logError("library.testLoadFailed", { error: String(e), filePath });
     }
     setLoading(false);
   };

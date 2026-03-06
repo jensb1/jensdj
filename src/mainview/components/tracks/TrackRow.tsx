@@ -10,6 +10,7 @@ import { CueToolbar } from "./CueToolbar.tsx";
 import { useCueStore } from "../../stores/cueStore.ts";
 import type { Peaks3Band, CuePoint } from "../../../shared/types.ts";
 import { debugLog } from "../../lib/debugLog.ts";
+import { syncPlay } from "../../utils/syncPlay.ts";
 
 interface TrackRowProps {
   trackId: string;
@@ -102,6 +103,7 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
   );
   const [customBeats, setCustomBeats] = useState<number[] | null>(null);
   const [downbeatOffset, setDownbeatOffset] = useState(0); // 0-3: which beat index is "1"
+  const [zoomHoverInfo, setZoomHoverInfo] = useState<string | null>(null);
 
   const positionRef = useRef(state.position);
 
@@ -170,6 +172,16 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
     },
     [trackId, setLockedPosition, state.isPlaying]
   );
+
+  const handlePlayFromPreview = useCallback(async (seconds: number) => {
+    positionRef.current = seconds;
+    await window.djRpc?.request?.seek?.({ trackId, seconds });
+    setPreviewPosition(trackId, null);
+    setLockedPosition(trackId, null);
+    if (!state.isPlaying) {
+      await syncPlay(trackId);
+    }
+  }, [trackId, setLockedPosition, setPreviewPosition, state.isPlaying]);
 
   // Space = lock at current preview, Esc = unlock
   useEffect(() => {
@@ -241,6 +253,7 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
             isPlaying={state.isPlaying}
             lockedPosition={state.lockedPosition}
             onLockedPositionChange={handleLockedPositionChange}
+            onHoverInfoChange={setZoomHoverInfo}
             cues={trackCues}
           />
         </div>
@@ -311,6 +324,12 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
         {/* Cue toolbar */}
         <CueToolbar trackId={trackId} getPosition={() => state.lockedPosition ?? positionRef.current} beats={displayBeats} />
 
+        {zoomHoverInfo && (
+          <span className="max-w-[220px] truncate text-[8px] font-mono text-zinc-500 shrink-0">
+            {zoomHoverInfo}
+          </span>
+        )}
+
         {/* Overview waveform */}
         <Waveform
           trackId={trackId}
@@ -323,6 +342,7 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
           cues={trackCues}
           onSeek={handleSeek}
           onPreview={handlePreview}
+          onPlayFromPreview={handlePlayFromPreview}
           onContainerRef={onWaveformRef}
         />
 

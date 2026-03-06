@@ -1,6 +1,7 @@
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useCueStore } from "../../stores/cueStore.ts";
 import type { CuePoint, ConnectionAction } from "../../../shared/types.ts";
+import { activateCue } from "../../utils/cueActions.ts";
 
 const ACTION_LABELS: Record<ConnectionAction, string> = {
   start: "Start",
@@ -14,12 +15,11 @@ interface CueMarkersProps {
   duration: number;
   containerWidth: number;
   trackId: string;
-  onGoto?: (time: number) => void;
 }
 
 function stop(e: React.MouseEvent) { e.stopPropagation(); }
 
-export function CueMarkers({ cues, duration, containerWidth, trackId, onGoto }: CueMarkersProps) {
+export function CueMarkers({ cues, duration, containerWidth, trackId }: CueMarkersProps) {
   const hoveredCue = useCueStore((s) => s.hoveredCueId);
   const setHoveredCue = useCueStore((s) => s.setHoveredCueId);
   const pendingConnection = useCueStore((s) => s.pendingConnection);
@@ -37,6 +37,33 @@ export function CueMarkers({ cues, duration, containerWidth, trackId, onGoto }: 
 
   const pendingSource = pendingConnection ? allCuesMap.get(pendingConnection) : null;
   const isPendingTarget = pendingSource && pendingSource.trackId !== trackId;
+  const hoverTimeoutRef = useRef<number>(0);
+
+  const keepCueHovered = useCallback((cueId: string) => {
+    if (hoverTimeoutRef.current) {
+      clearTimeout(hoverTimeoutRef.current);
+      hoverTimeoutRef.current = 0;
+    }
+    setHoveredCue(cueId);
+  }, [setHoveredCue]);
+
+  const releaseCueHover = useCallback((cueId: string) => {
+    if (hoverTimeoutRef.current) {
+      clearTimeout(hoverTimeoutRef.current);
+    }
+    hoverTimeoutRef.current = window.setTimeout(() => {
+      if (useCueStore.getState().hoveredCueId === cueId) {
+        useCueStore.getState().setHoveredCueId(null);
+      }
+      hoverTimeoutRef.current = 0;
+    }, 140);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (hoverTimeoutRef.current) clearTimeout(hoverTimeoutRef.current);
+    };
+  }, []);
 
   if (cues.length === 0 || duration <= 0 || containerWidth <= 0) return null;
 
@@ -82,9 +109,10 @@ export function CueMarkers({ cues, duration, containerWidth, trackId, onGoto }: 
             <div
               className="absolute top-0 bottom-0 pointer-events-auto"
               style={{ left: x - 6, width: 12 }}
-              onMouseEnter={() => setHoveredCue(cue.id)}
-              onMouseLeave={() => setHoveredCue(null)}
+              onMouseEnter={() => keepCueHovered(cue.id)}
+              onMouseLeave={() => releaseCueHover(cue.id)}
               onMouseDown={stop}
+              onClick={() => { void activateCue(trackId, cue); }}
             >
               <div
                 className="absolute top-0 bottom-0"
@@ -96,9 +124,10 @@ export function CueMarkers({ cues, duration, containerWidth, trackId, onGoto }: 
             <div
               className="absolute pointer-events-auto cursor-pointer"
               style={{ left: x - 1, top: 0, zIndex: 10 }}
-              onMouseEnter={() => setHoveredCue(cue.id)}
-              onMouseLeave={() => setHoveredCue(null)}
+              onMouseEnter={() => keepCueHovered(cue.id)}
+              onMouseLeave={() => releaseCueHover(cue.id)}
               onMouseDown={stop}
+              onClick={() => { void activateCue(trackId, cue); }}
             >
               <div
                 className="px-1 py-px text-[8px] font-bold font-mono rounded-b leading-tight"
@@ -115,18 +144,12 @@ export function CueMarkers({ cues, duration, containerWidth, trackId, onGoto }: 
             {isHovered && !pendingConnection && (
               <div
                 className="absolute pointer-events-auto z-30"
-                style={{ left: x - 1, top: 16 }}
-                onMouseEnter={() => setHoveredCue(cue.id)}
-                onMouseLeave={() => setHoveredCue(null)}
+                style={{ left: x - 1, top: 14 }}
+                onMouseEnter={() => keepCueHovered(cue.id)}
+                onMouseLeave={() => releaseCueHover(cue.id)}
                 onMouseDown={stop}
               >
                 <div className="bg-zinc-800 border border-zinc-600 rounded shadow-lg py-0.5 min-w-[90px]">
-                  <button
-                    className="block w-full text-left px-2 py-0.5 text-[9px] text-zinc-200 hover:bg-zinc-700"
-                    onClick={() => { onGoto?.(cue.time); setHoveredCue(null); }}
-                  >
-                    Go to
-                  </button>
                   <button
                     className="block w-full text-left px-2 py-0.5 text-[9px] text-zinc-200 hover:bg-zinc-700"
                     onClick={() => {

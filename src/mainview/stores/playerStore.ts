@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { LoadedTrack, OutputDevice } from "../../shared/types.ts";
-import { debugLog } from "../lib/debugLog.ts";
+import { debugLog, logInfo } from "../lib/debugLog.ts";
 
 export interface TrackState {
   track: LoadedTrack;
@@ -43,6 +43,11 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
         title: track.metadata.title,
         duration: Number(track.duration.toFixed(3)),
       });
+      logInfo("track.loaded", {
+        trackId: track.id,
+        title: track.metadata.title,
+        duration: Number(track.duration.toFixed(3)),
+      });
       const tracks = new Map(state.tracks);
       tracks.set(track.id, {
         track,
@@ -60,6 +65,7 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
   removeTrack: (trackId) =>
     set((state) => {
       debugLog("playerStore.removeTrack", { trackId });
+      logInfo("track.removed", { trackId });
       const tracks = new Map(state.tracks);
       tracks.delete(trackId);
       return { tracks };

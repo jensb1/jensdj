@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback, useState } from "react";
+import { useRef, useEffect, useCallback } from "react";
 import type { Peaks3Band, CuePoint } from "../../../shared/types.ts";
 import { debugLog, debugLogThrottled } from "../../lib/debugLog.ts";
 
@@ -12,12 +12,13 @@ interface ZoomedWaveformProps {
   isPlaying?: boolean;
   lockedPosition?: number | null;
   onLockedPositionChange?: (pos: number) => void;
+  onHoverInfoChange?: (info: string | null) => void;
   cues?: CuePoint[];
 }
 
 export function ZoomedWaveform({
   trackId, peaks, duration, beats, downbeatOffset = 0, zoom,
-  isPlaying = false, lockedPosition, onLockedPositionChange, cues,
+  isPlaying = false, lockedPosition, onLockedPositionChange, onHoverInfoChange, cues,
 }: ZoomedWaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number>(0);
@@ -122,18 +123,37 @@ export function ZoomedWaveform({
 
       // Draw beat grid lines
       if (beats && beats.length > 0) {
+        let lastLabelX = -Infinity;
         for (let i = 0; i < beats.length; i++) {
           const bt = beats[i] ?? 0;
           if (bt < timeStart - 1 || bt > timeStart + zoom + 1) continue;
           const x = timeToX(bt, timeStart, w);
-          const isBar = (i - downbeatOffset + 400) % 4 === 0;
-          if (!isBar) continue;
-          ctx.strokeStyle = "rgba(236, 72, 153, 0.8)";
-          ctx.lineWidth = 2;
+          const relativeIndex = i - downbeatOffset;
+          if (relativeIndex < 0) continue;
+          const beatInBar = ((relativeIndex % 4) + 4) % 4;
+          const barNumber = Math.floor(relativeIndex / 4) + 1;
+          const beatNumber = beatInBar + 1;
+          const isBarStart = beatInBar === 0;
+
+          ctx.strokeStyle = isBarStart
+            ? "rgba(236, 72, 153, 0.85)"
+            : "rgba(244, 114, 182, 0.35)";
+          ctx.lineWidth = isBarStart ? 2 : 1;
           ctx.beginPath();
           ctx.moveTo(x, 0);
           ctx.lineTo(x, h);
           ctx.stroke();
+
+          if (x < 10 || x > w - 10 || x - lastLabelX < 24) continue;
+
+          ctx.font = `${isBarStart ? "bold " : ""}9px monospace`;
+          ctx.fillStyle = isBarStart
+            ? "rgba(253, 164, 175, 0.95)"
+            : "rgba(253, 164, 175, 0.75)";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "top";
+          ctx.fillText(`${barNumber}.${beatNumber}`, x, 2);
+          lastLabelX = x;
         }
       }
 
@@ -337,7 +357,6 @@ export function ZoomedWaveform({
   }, [trackId, flushWaveformDraw, isLocked, isPlaying, lockedPosition]);
 
   // Drag to scrub — works when paused OR locked
-  const [hoverInfo, setHoverInfo] = useState<string | null>(null);
   const isDragging = useRef(false);
   const dragStartX = useRef(0);
   const dragStartPos = useRef(0);
@@ -417,9 +436,9 @@ export function ZoomedWaveform({
       }
       const beatNum = nearestIdx >= 0 ? `beat[${nearestIdx}]=${nearestBeat.toFixed(3)}s` : "no beats";
       const diff = nearestIdx >= 0 ? `Δ${((hoverTime - nearestBeat) * 1000).toFixed(0)}ms` : "";
-      setHoverInfo(`t=${hoverTime.toFixed(3)}s | ${beatNum} ${diff}`);
+      onHoverInfoChange?.(`t=${hoverTime.toFixed(3)}s | ${beatNum} ${diff}`.trim());
     },
-    [zoom, beats, duration, trackId, draw, canDrag, isLocked, onLockedPositionChange]
+    [zoom, beats, duration, trackId, draw, canDrag, isLocked, onLockedPositionChange, onHoverInfoChange]
   );
 
   const handleMouseUp = useCallback(
@@ -433,8 +452,8 @@ export function ZoomedWaveform({
   const handleMouseLeave = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     isDragging.current = false;
     e.currentTarget.style.cursor = canDrag ? "grab" : "default";
-    setHoverInfo(null);
-  }, [canDrag]);
+    onHoverInfoChange?.(null);
+  }, [canDrag, onHoverInfoChange]);
 
   return (
     <div className="relative">
@@ -446,11 +465,6 @@ export function ZoomedWaveform({
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
       />
-      {hoverInfo && (
-        <div className="absolute top-0 left-0 right-0 bg-black/70 text-[9px] font-mono text-zinc-300 px-1.5 py-0.5 pointer-events-none">
-          {hoverInfo}
-        </div>
-      )}
     </div>
   );
 }

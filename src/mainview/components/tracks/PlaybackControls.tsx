@@ -2,7 +2,7 @@ import { useCallback, useEffect } from "react";
 import { usePlayerStore } from "../../stores/playerStore.ts";
 import { syncPlay } from "../../utils/syncPlay.ts";
 import { Button } from "../ui/button.tsx";
-import { debugLog } from "../../lib/debugLog.ts";
+import { debugLog, logInfo } from "../../lib/debugLog.ts";
 
 interface PlaybackControlsProps {
   trackId: string;
@@ -17,27 +17,24 @@ export function PlaybackControls({ trackId, isPlaying }: PlaybackControlsProps) 
   }, [trackId, isPlaying]);
 
   const handlePlay = useCallback(async () => {
-    debugLog("playbackControls.playClick", { trackId, isPlaying });
     await syncPlay(trackId);
     const playbackState = await window.djRpc?.request?.getPlaybackState?.({ trackId });
-    debugLog("playbackControls.playAfter", { trackId, playbackState });
+    logInfo("playback.play", { trackId, playbackState });
   }, [trackId, isPlaying]);
 
   const handlePause = useCallback(async () => {
-    debugLog("playbackControls.pauseClick", { trackId, isPlaying });
     await window.djRpc?.request?.pause?.({ trackId });
     setPlaying(trackId, false);
     const playbackState = await window.djRpc?.request?.getPlaybackState?.({ trackId });
-    debugLog("playbackControls.pauseAfter", { trackId, playbackState });
+    logInfo("playback.pause", { trackId, playbackState });
   }, [trackId, setPlaying, isPlaying]);
 
   const handleStop = useCallback(async () => {
-    debugLog("playbackControls.stopClick", { trackId, isPlaying });
     await window.djRpc?.request?.stop?.({ trackId });
     setPlaying(trackId, false);
     window.dispatchEvent(new CustomEvent("dj:connectionsReset"));
     const playbackState = await window.djRpc?.request?.getPlaybackState?.({ trackId });
-    debugLog("playbackControls.stopAfter", { trackId, playbackState });
+    logInfo("playback.stop", { trackId, playbackState });
   }, [trackId, setPlaying, isPlaying]);
 
   return (

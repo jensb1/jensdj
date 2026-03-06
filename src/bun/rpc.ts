@@ -27,9 +27,6 @@ export function createRPC() {
         sendScanProgress: (payload) => webviewRef?.rpc?.send?.scanProgress?.(payload),
       }),
       messages: {
-        "*": (messageName, payload) => {
-          console.log("[RPC message]", messageName, payload);
-        },
         logToBun: ({ msg }) => {
           console.log("[WebView]", msg);
         },

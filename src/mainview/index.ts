@@ -3,10 +3,10 @@ import type { MainViewRPC } from "../shared/types.ts";
 import { createRoot } from "react-dom/client";
 import { createElement } from "react";
 import { MainLayout } from "./components/layout/MainLayout.tsx";
-import { debugLog, debugLogThrottled } from "./lib/debugLog.ts";
+import { debugLogThrottled, logError, logInfo, logWarn } from "./lib/debugLog.ts";
 import { usePlayerStore } from "./stores/playerStore.ts";
 
-console.log("[View] Initializing...");
+logInfo("view.init");
 
 // Define RPC handlers for messages FROM Bun
 const rpc = Electroview.defineRPC<MainViewRPC>({
@@ -17,7 +17,7 @@ const rpc = Electroview.defineRPC<MainViewRPC>({
       playbackTick: ({ trackId, position, isPlaying, level, loopStart, loopEnd }) => {
         const trackState = usePlayerStore.getState().tracks.get(trackId);
         if (trackState && trackState.isPlaying !== isPlaying) {
-          debugLog("index.backendPlayingState", {
+          logInfo("playback.stateSync", {
             trackId,
             from: trackState.isPlaying,
             to: isPlaying,
@@ -67,11 +67,10 @@ declare global {
 }
 window.djRpc = electroview.rpc;
 
-console.log("[View] RPC initialized, djRpc available:", !!window.djRpc);
-debugLog("index.rpcReady", { hasRpc: !!window.djRpc });
+logInfo("rpc.ready", { hasRpc: !!window.djRpc });
 
 window.addEventListener("error", (event) => {
-  debugLog("window.error", {
+  logError("window.error", {
     message: event.message,
     filename: event.filename,
     lineno: event.lineno,
@@ -80,7 +79,7 @@ window.addEventListener("error", (event) => {
 });
 
 window.addEventListener("unhandledrejection", (event) => {
-  debugLog("window.unhandledrejection", {
+  logWarn("window.unhandledrejection", {
     reason: String(event.reason),
   });
 });
@@ -89,7 +88,7 @@ window.addEventListener("unhandledrejection", (event) => {
 const root = document.getElementById("root");
 if (root) {
   createRoot(root).render(createElement(MainLayout));
-  console.log("[View] React mounted");
+  logInfo("view.mounted");
 } else {
-  console.error("[View] #root element not found");
+  logError("view.rootMissing");
 }
