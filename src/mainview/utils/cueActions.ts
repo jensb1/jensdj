@@ -77,19 +77,19 @@ export async function startConnectedCue(
 }
 
 export async function activateCue(trackId: string, cue: CuePoint): Promise<void> {
-  const connectedCue = cue.connectedCueId
-    ? useCueStore.getState().cues.get(cue.connectedCueId)
-    : null;
-
-  if (connectedCue) {
-    await startConnectedCue(trackId, cue, connectedCue);
-    logInfo("cue.activateConnected", {
-      sourceTrackId: trackId,
-      cueId: cue.id,
-      targetTrackId: connectedCue.trackId,
-      targetCueId: connectedCue.id,
-      targetTime: Number(connectedCue.time.toFixed(3)),
-    });
+  if (cue.connections.length > 0) {
+    for (const conn of cue.connections) {
+      const connectedCue = useCueStore.getState().cues.get(conn.cueId);
+      if (!connectedCue) continue;
+      await startConnectedCue(trackId, cue, connectedCue);
+      logInfo("cue.activateConnected", {
+        sourceTrackId: trackId,
+        cueId: cue.id,
+        targetTrackId: connectedCue.trackId,
+        targetCueId: connectedCue.id,
+        targetTime: Number(connectedCue.time.toFixed(3)),
+      });
+    }
     return;
   }
 

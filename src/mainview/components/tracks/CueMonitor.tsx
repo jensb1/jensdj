@@ -28,7 +28,7 @@ export function CueMonitor() {
 
       for (const [, cue] of cues) {
         if (cue.trackId !== trackId) continue;
-        if (!cue.connectedCueId) continue;
+        if (cue.connections.length === 0) continue;
         if (shouldRearmCue(position, cue.time)) {
           firedCues.current.delete(cue.id);
         }
@@ -37,47 +37,48 @@ export function CueMonitor() {
 
         if (!hasCrossedCue(previousPosition, position, cue.time)) continue;
 
-        const connectedCue = cues.get(cue.connectedCueId);
-        if (!connectedCue) continue;
-
         firedCues.current.add(cue.id);
-        const action = cue.connectionAction ?? "start";
-        const targetTrackId = connectedCue.trackId;
 
-        logInfo("cue.monitorTrigger", {
-          sourceTrackId: trackId,
-          cueId: cue.id,
-          cueLabel: cue.label,
-          cueTime: Number(cue.time.toFixed(3)),
-          targetTrackId,
-          targetCueId: connectedCue.id,
-          targetCueTime: Number(connectedCue.time.toFixed(3)),
-          action,
-          position: Number(position.toFixed(3)),
-          previousPosition: previousPosition != null ? Number(previousPosition.toFixed(3)) : null,
-        });
+        for (const conn of cue.connections) {
+          const connectedCue = cues.get(conn.cueId);
+          if (!connectedCue) continue;
 
-        switch (action) {
-          case "start": {
-            void startConnectedCue(trackId, cue, connectedCue);
-            break;
-          }
-          case "stop": {
-            window.djRpc?.request?.stop?.({ trackId: targetTrackId });
-            usePlayerStore.getState().setPlaying(targetTrackId, false);
-            break;
-          }
-          case "loop": {
-            // 4-bar loop starting at the connected cue
-            const targetState = usePlayerStore.getState().tracks.get(targetTrackId);
-            const bpm = targetState?.track.metadata.bpm ?? 120;
-            const fourBars = 4 * (60 / bpm) * 4; // 4 bars = 16 beats
-            window.djRpc?.request?.setLoop?.({
-              trackId: targetTrackId,
-              startSec: connectedCue.time,
-              endSec: connectedCue.time + fourBars,
-            });
-            break;
+          const targetTrackId = connectedCue.trackId;
+
+          logInfo("cue.monitorTrigger", {
+            sourceTrackId: trackId,
+            cueId: cue.id,
+            cueLabel: cue.label,
+            cueTime: Number(cue.time.toFixed(3)),
+            targetTrackId,
+            targetCueId: connectedCue.id,
+            targetCueTime: Number(connectedCue.time.toFixed(3)),
+            action: conn.action,
+            position: Number(position.toFixed(3)),
+            previousPosition: previousPosition != null ? Number(previousPosition.toFixed(3)) : null,
+          });
+
+          switch (conn.action) {
+            case "start": {
+              void startConnectedCue(trackId, cue, connectedCue);
+              break;
+            }
+            case "stop": {
+              window.djRpc?.request?.stop?.({ trackId: targetTrackId });
+              usePlayerStore.getState().setPlaying(targetTrackId, false);
+              break;
+            }
+            case "loop": {
+              const targetState = usePlayerStore.getState().tracks.get(targetTrackId);
+              const bpm = targetState?.track.metadata.bpm ?? 120;
+              const fourBars = 4 * (60 / bpm) * 4; // 4 bars = 16 beats
+              window.djRpc?.request?.setLoop?.({
+                trackId: targetTrackId,
+                startSec: connectedCue.time,
+                endSec: connectedCue.time + fourBars,
+              });
+              break;
+            }
           }
         }
       }

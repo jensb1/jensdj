@@ -61,15 +61,19 @@ export interface BeatConnection {
 // Cue / marker point
 export type ConnectionAction = 'start' | 'stop' | 'loop';
 
+export interface CueConnection {
+  cueId: string;
+  trackId: string;
+  action: ConnectionAction;
+}
+
 export interface CuePoint {
   id: string;
   trackId: string;
   label: string;        // 'A', 'B', 'C', 'D', ...
   time: number;         // seconds, snapped to beat
   color: string;
-  connectedCueId?: string;       // linked cue on another track
-  connectedTrackId?: string;     // track of the linked cue
-  connectionAction?: ConnectionAction; // what happens when playback reaches this cue (default: 'start')
+  connections: CueConnection[];  // linked cues on other tracks
 }
 
 // RPC type definitions for Electrobun

@@ -58,7 +58,7 @@ export function CueToolbar({ trackId, getPosition, beats }: CueToolbarProps) {
         <span key={cue.id} className="group flex items-center gap-0.5">
           <span
             className={`px-1 py-0.5 text-[7px] font-bold rounded ${
-              cue.connectedCueId || isPendingTarget ? "cursor-pointer hover:opacity-80" : ""
+              cue.connections.length > 0 || isPendingTarget ? "cursor-pointer hover:opacity-80" : ""
             } ${
               isPendingTarget ? "ring-1 ring-amber-400 animate-pulse" : ""
             }`}
@@ -68,13 +68,13 @@ export function CueToolbar({ trackId, getPosition, beats }: CueToolbarProps) {
                 completeConnection(cue.id);
                 return;
               }
-              if (cue.connectedCueId) {
+              if (cue.connections.length > 0) {
                 void activateCue(trackId, cue);
               }
             }}
             title={isPendingTarget
               ? `Click to connect ${pendingSource!.label} → ${cue.label}`
-              : cue.connectedCueId
+              : cue.connections.length > 0
                 ? `${cue.label} @ ${cue.time.toFixed(2)}s — click to jump to connected cue`
                 : `${cue.label} @ ${cue.time.toFixed(2)}s`
             }

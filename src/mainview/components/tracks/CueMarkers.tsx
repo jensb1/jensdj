@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { useCueStore } from "../../stores/cueStore.ts";
+import { usePlayerStore } from "../../stores/playerStore.ts";
 import type { CuePoint, ConnectionAction } from "../../../shared/types.ts";
 import { activateCue } from "../../utils/cueActions.ts";
 
@@ -65,21 +66,38 @@ export function CueMarkers({ cues, duration, containerWidth, trackId }: CueMarke
     };
   }, []);
 
+  // Cancel pending connection on click outside targets or Escape
+  const cancelConnection = useCueStore((s) => s.cancelConnection);
+  useEffect(() => {
+    if (!pendingConnection) return;
+    const handleEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") cancelConnection();
+    };
+    const handleClick = () => { cancelConnection(); };
+    window.addEventListener("keydown", handleEscape);
+    // Use bubble phase — target clicks call stopPropagation so won't reach here
+    window.addEventListener("mousedown", handleClick);
+    return () => {
+      window.removeEventListener("keydown", handleEscape);
+      window.removeEventListener("mousedown", handleClick);
+    };
+  }, [pendingConnection, cancelConnection]);
+
   if (cues.length === 0 || duration <= 0 || containerWidth <= 0) return null;
 
   const timeToX = (t: number) => (t / duration) * containerWidth;
 
   return (
     <div className="absolute inset-0" style={{ overflow: "visible", zIndex: 10 }}>
-      {/* Connection target highlights on other tracks */}
+      {/* Connection target highlights on other tracks — rendered with high z-index */}
       {isPendingTarget && cues.map((cue) => {
         const x = timeToX(cue.time);
         return (
           <div
             key={`target-${cue.id}`}
             className="absolute top-0 bottom-0 pointer-events-auto cursor-pointer"
-            style={{ left: x - 12, width: 24 }}
-            onMouseDown={(e) => { stop(e); completeConnection(cue.id); }}
+            style={{ left: x - 12, width: 24, zIndex: 50 }}
+            onMouseDown={(e) => { e.stopPropagation(); e.preventDefault(); completeConnection(cue.id); }}
           >
             <div
               className="absolute px-1.5 py-0.5 text-[9px] font-bold font-mono rounded animate-pulse"
@@ -100,8 +118,7 @@ export function CueMarkers({ cues, duration, containerWidth, trackId }: CueMarke
       {cues.map((cue) => {
         const x = timeToX(cue.time);
         const isHovered = hoveredCue === cue.id;
-        const isConnected = !!cue.connectedCueId;
-        const connectedCue = cue.connectedCueId ? allCuesMap.get(cue.connectedCueId) : null;
+        const hasConnections = cue.connections.length > 0;
 
         return (
           <div key={cue.id}>
@@ -113,7 +130,7 @@ export function CueMarkers({ cues, duration, containerWidth, trackId }: CueMarke
               onMouseLeave={() => releaseCueHover(cue.id)}
               onMouseDown={stop}
               onClick={() => {
-                if (cue.connectedCueId) {
+                if (hasConnections) {
                   void activateCue(trackId, cue);
                 }
               }}
@@ -126,13 +143,13 @@ export function CueMarkers({ cues, duration, containerWidth, trackId }: CueMarke
 
             {/* Label badge */}
             <div
-              className={`absolute pointer-events-auto ${cue.connectedCueId ? "cursor-pointer" : ""}`}
+              className={`absolute pointer-events-auto ${hasConnections ? "cursor-pointer" : ""}`}
               style={{ left: x - 1, top: 0, zIndex: 10 }}
               onMouseEnter={() => keepCueHovered(cue.id)}
               onMouseLeave={() => releaseCueHover(cue.id)}
               onMouseDown={stop}
               onClick={() => {
-                if (cue.connectedCueId) {
+                if (hasConnections) {
                   void activateCue(trackId, cue);
                 }
               }}
@@ -142,9 +159,13 @@ export function CueMarkers({ cues, duration, containerWidth, trackId }: CueMarke
                 style={{ backgroundColor: cue.color, color: "#000" }}
               >
                 {cue.label}
-                {isConnected && connectedCue && (
-                  <span className="ml-0.5 opacity-70">→{connectedCue.label}:{ACTION_LABELS[cue.connectionAction ?? "start"]}</span>
-                )}
+                {cue.connections.map((conn) => {
+                  const target = allCuesMap.get(conn.cueId);
+                  if (!target) return null;
+                  return (
+                    <span key={conn.cueId} className="ml-0.5 opacity-70">→{target.label}:{ACTION_LABELS[conn.action]}</span>
+                  );
+                })}
               </div>
             </div>
 
@@ -161,7 +182,10 @@ export function CueMarkers({ cues, duration, containerWidth, trackId }: CueMarke
                   <button
                     className="block w-full text-left px-2 py-0.5 text-[9px] text-zinc-200 hover:bg-zinc-700"
                     onClick={() => {
-                      window.djRpc?.request?.setLoop?.({ trackId, startSec: cue.time, endSec: cue.time + 4 * (60 / 120) });
+                      const trackState = usePlayerStore.getState().tracks.get(trackId);
+                      const bpm = trackState?.track.bpm ?? 120;
+                      const fourBars = 4 * (60 / bpm) * 4; // 4 bars = 16 beats
+                      window.djRpc?.request?.setLoop?.({ trackId, startSec: cue.time, endSec: cue.time + fourBars });
                       setHoveredCue(null);
                     }}
                   >
@@ -175,33 +199,36 @@ export function CueMarkers({ cues, duration, containerWidth, trackId }: CueMarke
                       Connect →
                     </button>
                   )}
-                  {isConnected && (
-                    <button
-                      className="block w-full text-left px-2 py-0.5 text-[9px] text-amber-300 hover:bg-zinc-700"
-                      onClick={() => {
-                        const cur = cue.connectionAction ?? "start";
-                        const idx = ACTION_ORDER.indexOf(cur);
-                        const next = ACTION_ORDER[(idx + 1) % ACTION_ORDER.length]!;
-                        useCueStore.getState().updateCue(cue.id, { connectionAction: next });
-                      }}
-                    >
-                      Action: {ACTION_LABELS[cue.connectionAction ?? "start"]} ↻
-                    </button>
-                  )}
-                  {isConnected && (
-                    <button
-                      className="block w-full text-left px-2 py-0.5 text-[9px] text-red-400 hover:bg-zinc-700"
-                      onClick={() => {
-                        useCueStore.getState().updateCue(cue.id, { connectedCueId: undefined, connectedTrackId: undefined, connectionAction: undefined });
-                        if (connectedCue) {
-                          useCueStore.getState().updateCue(connectedCue.id, { connectedCueId: undefined, connectedTrackId: undefined, connectionAction: undefined });
-                        }
-                        setHoveredCue(null);
-                      }}
-                    >
-                      Disconnect
-                    </button>
-                  )}
+                  {cue.connections.map((conn) => {
+                    const target = allCuesMap.get(conn.cueId);
+                    if (!target) return null;
+                    return (
+                      <div key={conn.cueId} className="flex items-center px-2 py-0.5 gap-1">
+                        <button
+                          className="text-[9px] text-amber-300 hover:bg-zinc-700 rounded px-0.5"
+                          onClick={() => {
+                            const idx = ACTION_ORDER.indexOf(conn.action);
+                            const next = ACTION_ORDER[(idx + 1) % ACTION_ORDER.length]!;
+                            const updated = cue.connections.map((c) =>
+                              c.cueId === conn.cueId ? { ...c, action: next } : c
+                            );
+                            useCueStore.getState().updateCue(cue.id, { connections: updated });
+                          }}
+                        >
+                          →{target.label}:{ACTION_LABELS[conn.action]} ↻
+                        </button>
+                        <button
+                          className="text-[9px] text-red-400 hover:bg-zinc-700 rounded px-0.5"
+                          onClick={() => {
+                            useCueStore.getState().removeConnection(cue.id, conn.cueId);
+                            setHoveredCue(null);
+                          }}
+                        >
+                          ✕
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
             )}
