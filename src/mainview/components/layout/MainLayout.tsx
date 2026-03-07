@@ -1,7 +1,9 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import { TrackList } from "../tracks/TrackList.tsx";
 import { LibraryPanel } from "../library/LibraryPanel.tsx";
+import { CueTable } from "../cues/CueTable.tsx";
 import { usePlayerStore } from "../../stores/playerStore.ts";
+import { useCueStore } from "../../stores/cueStore.ts";
 import { syncPlay } from "../../utils/syncPlay.ts";
 import { Button } from "../ui/button.tsx";
 import { logError, logInfo, logWarn } from "../../lib/debugLog.ts";
@@ -89,6 +91,12 @@ export function MainLayout() {
   const [libraryHeight, setLibraryHeight] = useState(280);
   const draggingRef = useRef(false);
 
+  // Helper: add track to player store + load persisted cues
+  const addTrackAndLoadCues = useCallback((track: import("../../../shared/types.ts").LoadedTrack) => {
+    addTrack(track);
+    useCueStore.getState().loadCuesForTrack(track.filePath, track.id);
+  }, [addTrack]);
+
   useEffect(() => {
     window.djRpc?.request?.getOutputDevices?.({} as never)?.then((devices) => {
       if (devices) setDevices(devices);
@@ -98,16 +106,16 @@ export function MainLayout() {
       const testPath = "/Volumes/MUSIC/all/acid pauli - nana.mp3";
       try {
         const t1 = await window.djRpc?.request?.loadTrack?.({ filePath: testPath });
-        if (t1) addTrack(t1);
+        if (t1) addTrackAndLoadCues(t1);
         const t2 = await window.djRpc?.request?.loadTrack?.({ filePath: testPath });
-        if (t2) addTrack(t2);
+        if (t2) addTrackAndLoadCues(t2);
         logInfo("library.autoLoad", { count: 2, filePath: testPath });
       } catch (e) {
         logWarn("library.autoLoadFailed", { error: String(e) });
       }
     };
     autoLoad();
-  }, [setDevices, addTrack]);
+  }, [setDevices, addTrackAndLoadCues]);
 
   const handleAddTrack = async () => {
     setLoading(true);
@@ -116,7 +124,7 @@ export function MainLayout() {
       if (files && files.length > 0) {
         for (const filePath of files) {
           const track = await window.djRpc?.request?.loadTrack?.({ filePath });
-          if (track) addTrack(track);
+          if (track) addTrackAndLoadCues(track);
         }
       }
     } catch (e) {
@@ -134,7 +142,7 @@ export function MainLayout() {
     try {
       const track = await window.djRpc?.request?.loadTrack?.({ filePath });
       if (track) {
-        addTrack(track);
+        addTrackAndLoadCues(track);
         if (pathInputRef.current) pathInputRef.current.value = "";
       }
     } catch (e) {
@@ -148,9 +156,9 @@ export function MainLayout() {
     try {
       const filePath = "/Volumes/MUSIC/all/acid pauli - nana.mp3";
       const track = await window.djRpc?.request?.loadTrack?.({ filePath });
-      if (track) addTrack(track);
+      if (track) addTrackAndLoadCues(track);
     } catch (e) {
-      logError("library.testLoadFailed", { error: String(e), filePath });
+      logError("library.testLoadFailed", { error: String(e) });
     }
     setLoading(false);
   };
@@ -244,9 +252,14 @@ export function MainLayout() {
         className="h-1 bg-zinc-800 hover:bg-indigo-500/50 cursor-row-resize transition-colors"
       />
 
-      {/* Library panel */}
-      <div style={{ height: libraryHeight }} className="shrink-0 overflow-hidden">
-        <LibraryPanel />
+      {/* Library + Cue panel */}
+      <div style={{ height: libraryHeight }} className="shrink-0 overflow-hidden flex">
+        <div className="flex-1 overflow-hidden border-r border-zinc-800">
+          <LibraryPanel />
+        </div>
+        <div className="w-[380px] shrink-0 overflow-hidden">
+          <CueTable />
+        </div>
       </div>
 
       {/* Status bar */}

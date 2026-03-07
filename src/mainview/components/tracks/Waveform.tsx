@@ -379,6 +379,7 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
           containerWidth={containerRef.current?.getBoundingClientRect().width ?? 0}
           trackId={trackId}
           beats={beats}
+          downbeatOffset={downbeatOffset}
           onCueDrag={onCueDrag}
         />
       )}

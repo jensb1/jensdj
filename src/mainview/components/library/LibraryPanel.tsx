@@ -1,6 +1,7 @@
 import { useEffect, useCallback, useState, useRef } from "react";
 import { useLibraryStore } from "../../stores/libraryStore.ts";
 import { usePlayerStore } from "../../stores/playerStore.ts";
+import { useCueStore } from "../../stores/cueStore.ts";
 import { SearchBar } from "./SearchBar.tsx";
 import { TrackTable } from "./TrackTable.tsx";
 import { Button } from "../ui/button.tsx";
@@ -17,6 +18,7 @@ export function LibraryPanel() {
   const setScanning = useLibraryStore((s) => s.setScanning);
   const setScanProgress = useLibraryStore((s) => s.setScanProgress);
   const addTrack = usePlayerStore((s) => s.addTrack);
+  const loadCuesForTrack = useCueStore((s) => s.loadCuesForTrack);
 
   const [sorting, setSorting] = useState<SortingState>([]);
   const [loading, setLoading] = useState(false);
@@ -72,13 +74,16 @@ export function LibraryPanel() {
         const loaded = await window.djRpc?.request?.loadTrack?.({
           filePath: track.filePath,
         });
-        if (loaded) addTrack(loaded);
+        if (loaded) {
+          addTrack(loaded);
+          loadCuesForTrack(loaded.filePath, loaded.id);
+        }
       } catch (e) {
         console.error("[Library] Load failed:", e);
       }
       setLoading(false);
     },
-    [addTrack]
+    [addTrack, loadCuesForTrack]
   );
 
   return (

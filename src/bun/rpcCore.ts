@@ -2,7 +2,12 @@ import { parseFile } from "music-metadata";
 import { homedir } from "os";
 import { join } from "path";
 import { AudioEngine } from "./audio/engine.ts";
-import { initDB, searchTracks, getTrackCount } from "./library/db.ts";
+import {
+  initDB, searchTracks, getTrackCount,
+  getCuesForTrack, upsertCue, deleteCue as dbDeleteCue,
+  upsertConnection, deleteConnection as dbDeleteConnection,
+  upsertCollectionTrack, getCollectionTrack, getAllCollectionTracks,
+} from "./library/db.ts";
 import { scanDirectory as scanDir } from "./library/scanner.ts";
 
 interface PlaybackTickPayload {
@@ -177,6 +182,10 @@ export function createRpcRequestHandlers(audioEngine: AudioEngine, hooks: Reques
       audioEngine.setMasterBpm(bpm);
     },
 
+    setFilter: ({ trackId, value }: { trackId: string; value: number }) => {
+      audioEngine.setFilter(trackId, value);
+    },
+
     getPlaybackState: ({ trackId }: { trackId: string }) => {
       return {
         position: audioEngine.getPosition(trackId),
@@ -244,6 +253,47 @@ export function createRpcRequestHandlers(audioEngine: AudioEngine, hooks: Reques
         key: t.key,
         filePath: t.filePath,
       }));
+    },
+
+    getCuesForTrack: ({ filePath }: { filePath: string }) => {
+      return getCuesForTrack(filePath);
+    },
+
+    saveCue: ({ cue }: { cue: { id: string; filePath: string; label: string; time: number; color: string; active: boolean } }) => {
+      upsertCue(cue);
+    },
+
+    deleteCue: ({ cueId }: { cueId: string }) => {
+      dbDeleteCue(cueId);
+    },
+
+    saveCueConnection: ({ id, sourceCueId, targetCueId, targetFilePath, action }: {
+      id: string; sourceCueId: string; targetCueId: string; targetFilePath: string; action: string;
+    }) => {
+      upsertConnection({ id, sourceCueId, targetCueId, targetFilePath, action });
+    },
+
+    deleteCueConnection: ({ connectionId }: { connectionId: string }) => {
+      dbDeleteConnection(connectionId);
+    },
+
+    saveCollectionTrack: ({ filePath, title, artist, album, genre, duration, bpm, key, peaks, beats }: {
+      filePath: string; title: string; artist: string; album: string; genre: string;
+      duration: number; bpm: number; key: string; peaks: unknown; beats: unknown;
+    }) => {
+      upsertCollectionTrack({
+        filePath, title, artist, album, genre, duration, bpm, key,
+        peaks: peaks as import("../shared/types.ts").Peaks3Band | null,
+        beats: beats as number[] | null,
+      });
+    },
+
+    getCollectionTrack: ({ filePath }: { filePath: string }) => {
+      return getCollectionTrack(filePath);
+    },
+
+    getCollectionTracks: () => {
+      return getAllCollectionTracks();
     },
   };
 }

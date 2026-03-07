@@ -6,7 +6,6 @@ import { ZoomedWaveform } from "./ZoomedWaveform.tsx";
 import { Button } from "../ui/button.tsx";
 import { EQControls } from "../mixer/EQControls.tsx";
 import { OutputSelector } from "../mixer/OutputSelector.tsx";
-import { CueToolbar } from "./CueToolbar.tsx";
 import { useCueStore } from "../../stores/cueStore.ts";
 import type { Peaks3Band, CuePoint } from "../../../shared/types.ts";
 import { debugLog } from "../../lib/debugLog.ts";
@@ -16,6 +15,7 @@ interface TrackRowProps {
   trackId: string;
   state: {
     track: {
+      filePath: string;
       metadata: { title: string; artist: string; bpm: number };
       duration: number;
       peaks: Peaks3Band;
@@ -95,6 +95,7 @@ function formatPreciseTime(seconds: number): string {
 
 export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
   const removeTrack = usePlayerStore((s) => s.removeTrack);
+  const isSelected = usePlayerStore((s) => s.selectedTrackId === trackId);
   const cuesMap = useCueStore((s) => s.cues);
   const trackCues = useMemo(() => {
     const result: CuePoint[] = [];
@@ -113,6 +114,14 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
   const [zoomHoverTime, setZoomHoverTime] = useState<number | null>(null);
 
   const positionRef = useRef(state.position);
+
+  // Refs for MIDI handler to avoid stale closures
+  const lockedPosRef = useRef(state.lockedPosition);
+  lockedPosRef.current = state.lockedPosition;
+  const previewPosRef = useRef(state.previewPosition);
+  previewPosRef.current = state.previewPosition;
+  const trackCuesRef = useRef(trackCues);
+  trackCuesRef.current = trackCues;
 
   // Direct DOM update for time display — no React re-render
   useEffect(() => {
@@ -138,6 +147,7 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
 
   const handleRemove = useCallback(async () => {
     await window.djRpc?.request?.unloadTrack?.({ trackId });
+    useCueStore.getState().unloadCuesForTrack(trackId);
     removeTrack(trackId);
   }, [trackId, removeTrack]);
 
@@ -148,8 +158,11 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
     (seconds: number) => {
       positionRef.current = seconds;
       window.djRpc?.request?.seek?.({ trackId, seconds });
+      // Also update store position so CueTable can read it
+      setLockedPosition(trackId, seconds);
+      setPreviewPosition(trackId, seconds);
     },
-    [trackId]
+    [trackId, setLockedPosition, setPreviewPosition]
   );
 
   const handlePreview = useCallback(
@@ -234,8 +247,71 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
     : state.track.metadata.bpm;
   const currentPosition = positionRef.current;
 
+  // Handle MIDI actions for this track
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const { action, trackId: tid, value } = (e as CustomEvent).detail;
+      if (tid !== trackId) return;
+      if (action === "volume") {
+        usePlayerStore.getState().setVolume(trackId, value);
+      } else if (action === "play") {
+        syncPlay(trackId);
+      } else if (action === "addCue") {
+        // Use preview/locked position if available, otherwise fall back to play position
+        const pos = lockedPosRef.current ?? previewPosRef.current ?? value;
+        useCueStore.getState().addOrToggleCue(trackId, state.track.filePath, pos, displayBeats, downbeatOffset);
+      } else if (action === "selectCue") {
+        const cues = [...trackCuesRef.current].sort((a, b) => a.time - b.time);
+        if (cues.length === 0) return;
+        const currentPos = lockedPosRef.current ?? positionRef.current;
+        if (value > 0) {
+          const next = cues.find((c) => c.time > currentPos + 0.01) ?? cues[0]!;
+          setLockedPosition(trackId, next.time);
+          setPreviewPosition(trackId, next.time);
+          lockedPosRef.current = next.time;
+        } else {
+          const prev = [...cues].reverse().find((c) => c.time < currentPos - 0.01) ?? cues[cues.length - 1]!;
+          setLockedPosition(trackId, prev.time);
+          setPreviewPosition(trackId, prev.time);
+          lockedPosRef.current = prev.time;
+        }
+      } else if (action === "activateCue") {
+        const pos = lockedPosRef.current ?? previewPosRef.current;
+        if (pos != null) {
+          syncPlay(trackId, { targetAnchorPos: pos });
+        }
+      } else if (action === "jumpPreview") {
+        // Move preview cursor by full bars (4 beats)
+        if (displayBeats.length < 2) return;
+        const currentPos = lockedPosRef.current ?? positionRef.current;
+        const barSize = 4; // beats per bar
+        // Find the current beat index
+        let closestIdx = 0;
+        let minDist = Infinity;
+        for (let i = 0; i < displayBeats.length; i++) {
+          const d = Math.abs(displayBeats[i]! - currentPos);
+          if (d < minDist) { minDist = d; closestIdx = i; }
+        }
+        // Move by one bar (4 beats)
+        const targetIdx = Math.max(0, Math.min(displayBeats.length - 1, closestIdx + value * barSize));
+        const newPos = displayBeats[targetIdx]!;
+        setLockedPosition(trackId, newPos);
+        setPreviewPosition(trackId, newPos);
+        lockedPosRef.current = newPos;
+      }
+    };
+    window.addEventListener("dj:midiAction", handler);
+    return () => window.removeEventListener("dj:midiAction", handler);
+  }, [trackId, displayBeats, setLockedPosition, setPreviewPosition]);
+
+  const setSelectedTrackId = usePlayerStore((s) => s.setSelectedTrackId);
+
   return (
-    <div data-testid={`track-row-${trackId}`} className="border-b border-zinc-800/50 bg-zinc-900/30 hover:bg-zinc-900/60 transition-colors">
+    <div
+      data-testid={`track-row-${trackId}`}
+      className={`border-b border-zinc-800/50 bg-zinc-900/30 hover:bg-zinc-900/60 transition-colors border-l-2 ${isSelected ? "border-l-amber-400" : "border-l-transparent"}`}
+      onClick={() => setSelectedTrackId(trackId)}
+    >
       {/* Top row: mixer square + zoomed waveform */}
       <div className="flex px-4 pt-2 gap-2">
         {/* Mixer square: EQ knobs + volume fader */}
@@ -269,6 +345,10 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
             position={currentPosition}
             lockedPosition={state.lockedPosition}
             onLockedPositionChange={handleLockedPositionChange}
+            onUnlock={() => {
+              setLockedPosition(trackId, null);
+              setPreviewPosition(trackId, null);
+            }}
             onHoverTimeChange={setZoomHoverTime}
             cues={trackCues}
           />
@@ -336,9 +416,6 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
             </span>
           )}
         </div>
-
-        {/* Cue toolbar */}
-        <CueToolbar trackId={trackId} getPosition={() => state.lockedPosition ?? positionRef.current} beats={displayBeats} />
 
         {/* Overview waveform */}
         <Waveform

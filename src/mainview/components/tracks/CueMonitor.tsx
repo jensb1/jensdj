@@ -28,6 +28,7 @@ export function CueMonitor() {
 
       for (const [, cue] of cues) {
         if (cue.trackId !== trackId) continue;
+        if (!cue.active) continue;
         if (cue.connections.length === 0) continue;
         if (shouldRearmCue(position, cue.time)) {
           firedCues.current.delete(cue.id);

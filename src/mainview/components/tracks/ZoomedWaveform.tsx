@@ -14,13 +14,14 @@ interface ZoomedWaveformProps {
   position?: number;
   lockedPosition?: number | null;
   onLockedPositionChange?: (pos: number) => void;
+  onUnlock?: () => void;
   onHoverTimeChange?: (time: number | null) => void;
   cues?: CuePoint[];
 }
 
 export function ZoomedWaveform({
   trackId, peaks, duration, beats, downbeatOffset = 0, zoom,
-  isPlaying = false, position = 0, lockedPosition, onLockedPositionChange, onHoverTimeChange, cues,
+  isPlaying = false, position = 0, lockedPosition, onLockedPositionChange, onUnlock, onHoverTimeChange, cues,
 }: ZoomedWaveformProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number>(0);
@@ -193,18 +194,22 @@ export function ZoomedWaveform({
           // Vertical line
           ctx.strokeStyle = cue.color;
           ctx.lineWidth = 2;
-          ctx.globalAlpha = 0.8;
+          ctx.globalAlpha = cue.active ? 0.8 : 0.3;
+          if (!cue.active) ctx.setLineDash([4, 4]);
           ctx.beginPath();
           ctx.moveTo(cx, 0);
           ctx.lineTo(cx, h);
           ctx.stroke();
+          if (!cue.active) ctx.setLineDash([]);
           ctx.globalAlpha = 1;
           // Label badge
+          ctx.globalAlpha = cue.active ? 1 : 0.4;
           ctx.fillStyle = cue.color;
           ctx.fillRect(cx, 0, 14, 12);
           ctx.fillStyle = "#000";
           ctx.font = "bold 9px monospace";
           ctx.fillText(cue.label, cx + 3, 10);
+          ctx.globalAlpha = 1;
         }
       }
 
@@ -242,12 +247,7 @@ export function ZoomedWaveform({
       ctx.stroke();
       ctx.shadowBlur = 0;
 
-      // "LOCKED" indicator
-      if (isLocked) {
-        ctx.fillStyle = "rgba(245, 158, 11, 0.7)";
-        ctx.font = "bold 9px monospace";
-        ctx.fillText("LOCKED", 4, 10);
-      }
+      // "LOCKED" indicator drawn via HTML overlay (see below)
     },
     [peaks, duration, beats, downbeatOffset, zoom, isPlaying, isLocked, cues]
   );
@@ -357,7 +357,14 @@ export function ZoomedWaveform({
         loopEnd: loopEnd != null ? Number(loopEnd.toFixed(3)) : null,
       });
 
-      if (!animFrameRef.current) {
+      // When locked, always schedule a redraw so the play cursor animates smoothly
+      if (isLocked) {
+        if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+        animFrameRef.current = requestAnimationFrame(() => {
+          animFrameRef.current = 0;
+          redrawRef.current();
+        });
+      } else if (!animFrameRef.current) {
         animFrameRef.current = requestAnimationFrame(() => {
           flushWaveformDraw();
         });
@@ -429,13 +436,20 @@ export function ZoomedWaveform({
         time = Math.max(0, Math.min(duration, time));
 
         if (beats && beats.length > 0) {
-          let nearest = beats[0] ?? 0;
-          let minDist = Infinity;
-          for (const bt of beats) {
-            const d = Math.abs(bt - time);
-            if (d < minDist) { minDist = d; nearest = bt; }
+          // Snap to nearest downbeat (bar start)
+          const downbeats: number[] = [];
+          for (let i = downbeatOffset; i < beats.length; i += 4) {
+            downbeats.push(beats[i]!);
           }
-          time = nearest;
+          if (downbeats.length > 0) {
+            let nearest = downbeats[0]!;
+            let minDist = Infinity;
+            for (const bt of downbeats) {
+              const d = Math.abs(bt - time);
+              if (d < minDist) { minDist = d; nearest = bt; }
+            }
+            time = nearest;
+          }
         }
 
         useCueStore.getState().updateCue(draggingCueRef.current, { time });
@@ -535,6 +549,15 @@ export function ZoomedWaveform({
         onMouseUp={handleMouseUp}
         onMouseLeave={handleMouseLeave}
       />
+      {isLocked && (
+        <button
+          className="absolute top-1 left-1 z-20 flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-amber-400 text-[9px] font-bold font-mono hover:bg-amber-500/30 transition-colors pointer-events-auto"
+          onClick={(e) => { e.stopPropagation(); onUnlock?.(); }}
+          title="Resume following playback (Esc)"
+        >
+          ▶ FOLLOW
+        </button>
+      )}
     </div>
   );
 }

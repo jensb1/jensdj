@@ -62,18 +62,37 @@ export interface BeatConnection {
 export type ConnectionAction = 'start' | 'stop' | 'loop';
 
 export interface CueConnection {
-  cueId: string;
-  trackId: string;
+  id: string;              // persistent UUID
+  cueId: string;           // target cue persistent UUID
+  targetFilePath: string;  // stable file reference for auto-load
   action: ConnectionAction;
 }
 
 export interface CuePoint {
-  id: string;
-  trackId: string;
-  label: string;        // 'A', 'B', 'C', 'D', ...
-  time: number;         // seconds, snapped to beat
+  id: string;              // persistent UUID
+  filePath: string;        // stable track identifier
+  trackId: string;         // runtime-only, set when track is loaded
+  label: string;           // 'A', 'B', 'C', 'D', ...
+  time: number;            // seconds, snapped to beat
   color: string;
+  active: boolean;
   connections: CueConnection[];  // linked cues on other tracks
+}
+
+// Persisted track in the DJ collection
+export interface CollectionTrack {
+  filePath: string;
+  title: string;
+  artist: string;
+  album: string;
+  genre: string;
+  duration: number;
+  bpm: number;
+  key: string;
+  peaks: Peaks3Band | null;
+  beats: number[] | null;
+  cues: CuePoint[];
+  addedAt: string;
 }
 
 // RPC type definitions for Electrobun
@@ -156,6 +175,18 @@ export type MainViewRPC = {
         params: { bpm: number };
         response: void;
       };
+      setFilter: {
+        params: { trackId: string; value: number };
+        response: void;
+      };
+      getMidiDevices: {
+        params: Record<string, never>;
+        response: { sources: string[]; destinations: string[] };
+      };
+      openMidiInput: {
+        params: { sourceIndex: number };
+        response: boolean;
+      };
       getPlaybackState: {
         params: { trackId: string };
         response: PlaybackState;
@@ -175,6 +206,38 @@ export type MainViewRPC = {
       searchLibrary: {
         params: { query: string; sortBy?: string; sortDir?: string };
         response: TrackMetadata[];
+      };
+      getCuesForTrack: {
+        params: { filePath: string };
+        response: CuePoint[];
+      };
+      saveCue: {
+        params: { cue: { id: string; filePath: string; label: string; time: number; color: string; active: boolean } };
+        response: void;
+      };
+      deleteCue: {
+        params: { cueId: string };
+        response: void;
+      };
+      saveCueConnection: {
+        params: { id: string; sourceCueId: string; targetCueId: string; targetFilePath: string; action: string };
+        response: void;
+      };
+      deleteCueConnection: {
+        params: { connectionId: string };
+        response: void;
+      };
+      saveCollectionTrack: {
+        params: { filePath: string; title: string; artist: string; album: string; genre: string; duration: number; bpm: number; key: string; peaks: Peaks3Band | null; beats: number[] | null };
+        response: void;
+      };
+      getCollectionTrack: {
+        params: { filePath: string };
+        response: CollectionTrack | null;
+      };
+      getCollectionTracks: {
+        params: Record<string, never>;
+        response: CollectionTrack[];
       };
     };
     messages: {
@@ -208,6 +271,18 @@ export type MainViewRPC = {
         bpm: number;
         beats: number[];
         peaks: Peaks3Band;
+      };
+      midiState: {
+        selectedTrackId: string | null;
+        selectedCueIndex: number;
+        connected: boolean;
+        deviceName: string | null;
+      };
+      midiAction: {
+        action: string;
+        trackId: string | null;
+        value: number;
+        band?: string;
       };
     };
   }>;

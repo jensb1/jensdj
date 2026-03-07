@@ -5,6 +5,7 @@ import { createElement } from "react";
 import { MainLayout } from "./components/layout/MainLayout.tsx";
 import { debugLogThrottled, logError, logInfo, logWarn } from "./lib/debugLog.ts";
 import { usePlayerStore } from "./stores/playerStore.ts";
+import { useCueStore } from "./stores/cueStore.ts";
 
 logInfo("view.init");
 
@@ -53,6 +54,20 @@ const rpc = Electroview.defineRPC<MainViewRPC>({
           })
         );
       },
+      midiState: ({ selectedTrackId, selectedCueIndex, connected, deviceName }) => {
+        usePlayerStore.getState().setSelectedTrackId(selectedTrackId);
+        usePlayerStore.getState().setMidiConnected(connected, deviceName);
+        window.dispatchEvent(
+          new CustomEvent("dj:midiState", {
+            detail: { selectedTrackId, selectedCueIndex, connected, deviceName },
+          })
+        );
+      },
+      midiAction: (payload) => {
+        window.dispatchEvent(
+          new CustomEvent("dj:midiAction", { detail: payload })
+        );
+      },
     },
   },
 });
@@ -82,6 +97,28 @@ declare global {
         beats: number[];
       }>>;
       sleep: (ms: number) => Promise<boolean>;
+      setSelectedTrack: (trackId: string) => void;
+      setLockedPosition: (trackId: string, position: number) => void;
+      addOrToggleCue: (trackId: string, position: number) => {
+        id: string; time: number; active: boolean; label: string;
+      } | null;
+      getCueSnapshot: (trackId: string) => {
+        id: string; time: number; active: boolean; label: string; filePath: string;
+      }[];
+      getSelectedTrackState: () => {
+        trackId: string | null;
+        lockedPosition: number | null;
+        previewPosition: number | null;
+        position: number;
+      };
+      toggleCueActive: (cueId: string) => boolean;
+      connectCues: (sourceCueId: string, targetCueId: string) => boolean;
+      getCueDetail: (cueId: string) => {
+        id: string; time: number; active: boolean; label: string;
+        trackId: string; filePath: string;
+        connections: { id: string; cueId: string; targetFilePath: string; action: string }[];
+      } | null;
+      removeAllCuesForTrack: (trackId: string) => number;
     };
   }
 }
@@ -157,6 +194,80 @@ window.__jensdjAutomation = {
   async sleep(ms: number) {
     await new Promise((resolve) => setTimeout(resolve, ms));
     return true;
+  },
+  setSelectedTrack(trackId: string) {
+    usePlayerStore.getState().setSelectedTrackId(trackId);
+  },
+  setLockedPosition(trackId: string, position: number) {
+    usePlayerStore.getState().setLockedPosition(trackId, position);
+    usePlayerStore.getState().setPreviewPosition(trackId, position);
+  },
+  addOrToggleCue(trackId: string, position: number) {
+    const track = usePlayerStore.getState().tracks.get(trackId);
+    if (!track) return null;
+    const cue = useCueStore.getState().addOrToggleCue(
+      trackId, track.track.filePath, position, track.track.beats
+    );
+    if (!cue) return null;
+    return { id: cue.id, time: cue.time, active: cue.active, label: cue.label };
+  },
+  getCueSnapshot(trackId: string) {
+    const cues = useCueStore.getState().cues;
+    const result: { id: string; time: number; active: boolean; label: string; filePath: string }[] = [];
+    for (const cue of cues.values()) {
+      if (cue.trackId === trackId) {
+        result.push({ id: cue.id, time: cue.time, active: cue.active, label: cue.label, filePath: cue.filePath });
+      }
+    }
+    return result.sort((a, b) => a.time - b.time);
+  },
+  getSelectedTrackState() {
+    const state = usePlayerStore.getState();
+    const trackId = state.selectedTrackId;
+    if (!trackId) return { trackId: null, lockedPosition: null, previewPosition: null, position: 0 };
+    const ts = state.tracks.get(trackId);
+    if (!ts) return { trackId: null, lockedPosition: null, previewPosition: null, position: 0 };
+    return {
+      trackId,
+      lockedPosition: ts.lockedPosition,
+      previewPosition: ts.previewPosition,
+      position: ts.position,
+    };
+  },
+  toggleCueActive(cueId: string) {
+    const cue = useCueStore.getState().cues.get(cueId);
+    if (!cue) return false;
+    useCueStore.getState().toggleActive(cueId);
+    return true;
+  },
+  connectCues(sourceCueId: string, targetCueId: string) {
+    useCueStore.getState().startConnection(sourceCueId);
+    useCueStore.getState().completeConnection(targetCueId);
+    // Verify it was created
+    const source = useCueStore.getState().cues.get(sourceCueId);
+    return source?.connections.some(c => c.cueId === targetCueId) ?? false;
+  },
+  getCueDetail(cueId: string) {
+    const cue = useCueStore.getState().cues.get(cueId);
+    if (!cue) return null;
+    return {
+      id: cue.id, time: cue.time, active: cue.active, label: cue.label,
+      trackId: cue.trackId, filePath: cue.filePath,
+      connections: cue.connections.map(c => ({
+        id: c.id, cueId: c.cueId, targetFilePath: c.targetFilePath, action: c.action,
+      })),
+    };
+  },
+  removeAllCuesForTrack(trackId: string) {
+    const cues = useCueStore.getState().cues;
+    const toRemove: string[] = [];
+    for (const [id, cue] of cues) {
+      if (cue.trackId === trackId) toRemove.push(id);
+    }
+    for (const id of toRemove) {
+      useCueStore.getState().removeCue(id);
+    }
+    return toRemove.length;
   },
 };
 

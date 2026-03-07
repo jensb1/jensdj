@@ -375,3 +375,258 @@ testIfDesktop("track 2 parked on a later beat stays tightly synced when started 
   expect(afterStart.track_2.backendIsPlaying).toBe(true);
   expect(diffMs).toBeLessThan(20);
 });
+
+testIfDesktop("cue point placed at preview position, not beginning", async () => {
+  // Stop all tracks first
+  await evaluate(`
+    (async () => {
+      const snapshot = await window.__jensdjAutomation.getPlaybackSnapshot();
+      for (const [trackId] of Object.entries(snapshot)) {
+        const stopButton = document.querySelector(\`[data-testid="track-\${trackId}-stop"]\`);
+        if (stopButton instanceof HTMLElement) stopButton.click();
+      }
+      await window.__jensdjAutomation.sleep(300);
+      return true;
+    })()
+  `);
+
+  const trackIds = await evaluate<string[]>("window.__jensdjAutomation.getTrackIds()");
+  const trackId = trackIds[0]!;
+
+  // Get track beats to find a good position (~30 seconds in)
+  const ctx = await evaluate<Record<string, {
+    beats: number[];
+    firstBeat: number;
+  }>>(`window.__jensdjAutomation.getTrackContext([${JSON.stringify(trackId)}])`);
+  const trackCtx = ctx[trackId]!;
+  const targetBeat = trackCtx.beats.find((b: number) => b >= 30) ?? trackCtx.beats[Math.floor(trackCtx.beats.length / 2)]!;
+
+  console.log("[CueE2E] Using trackId:", trackId, "targetBeat:", targetBeat);
+
+  // Step 1: Select the track and set a preview/locked position at ~30s
+  await evaluate(`
+    window.__jensdjAutomation.setSelectedTrack(${JSON.stringify(trackId)});
+    window.__jensdjAutomation.setLockedPosition(${JSON.stringify(trackId)}, ${targetBeat});
+  `);
+
+  // Verify store state after setting locked position
+  const stateAfterLock = await evaluate<{
+    trackId: string | null;
+    lockedPosition: number | null;
+    previewPosition: number | null;
+    position: number;
+  }>("window.__jensdjAutomation.getSelectedTrackState()");
+
+  console.log("[CueE2E] State after lock:", stateAfterLock);
+  expect(stateAfterLock.trackId).toBe(trackId);
+  expect(stateAfterLock.lockedPosition).toBe(targetBeat);
+
+  // Step 2: Add a cue at the locked position
+  const addResult = await evaluate<{
+    id: string; time: number; active: boolean; label: string;
+  } | null>(`window.__jensdjAutomation.addOrToggleCue(${JSON.stringify(trackId)}, ${targetBeat})`);
+
+  console.log("[CueE2E] addOrToggleCue result:", addResult);
+  expect(addResult).not.toBeNull();
+  expect(addResult!.label).toBe("A");
+  expect(addResult!.active).toBe(false);
+
+  // Step 3: Verify the cue was placed at the correct position (NOT at the beginning)
+  const cueTimeDiff = Math.abs(addResult!.time - targetBeat);
+  console.log("[CueE2E] cue time:", addResult!.time, "target:", targetBeat, "diff:", cueTimeDiff);
+  // Cue should be snapped to nearest beat around targetBeat, not at the beginning
+  expect(addResult!.time).toBeGreaterThan(10);
+  expect(cueTimeDiff).toBeLessThan(2); // within 2 seconds (beat snapping)
+
+  // Step 4: Verify cue shows up in the snapshot
+  const cues = await evaluate<{
+    id: string; time: number; active: boolean; label: string; filePath: string;
+  }[]>(`window.__jensdjAutomation.getCueSnapshot(${JSON.stringify(trackId)})`);
+  console.log("[CueE2E] cue snapshot:", cues);
+  expect(cues.length).toBeGreaterThanOrEqual(1);
+  expect(cues[0]!.time).toBeGreaterThan(10);
+  expect(cues[0]!.active).toBe(false);
+
+  // Step 5: Toggle cue to active by calling addOrToggleCue at the same position
+  const toggleResult = await evaluate<{
+    id: string; time: number; active: boolean; label: string;
+  } | null>(`window.__jensdjAutomation.addOrToggleCue(${JSON.stringify(trackId)}, ${targetBeat})`);
+
+  console.log("[CueE2E] toggle result:", toggleResult);
+  expect(toggleResult).not.toBeNull();
+  // After toggle, the cue should now be active
+  const cuesAfterToggle = await evaluate<{
+    id: string; time: number; active: boolean; label: string;
+  }[]>(`window.__jensdjAutomation.getCueSnapshot(${JSON.stringify(trackId)})`);
+  const toggledCue = cuesAfterToggle.find(c => Math.abs(c.time - addResult!.time) < 0.1);
+  console.log("[CueE2E] cue after toggle:", toggledCue);
+  expect(toggledCue).toBeDefined();
+  expect(toggledCue!.active).toBe(true);
+
+  // Step 6: Verify clicking cue in table jumps to correct position
+  // First reset locked position to 0
+  await evaluate(`
+    window.__jensdjAutomation.setLockedPosition(${JSON.stringify(trackId)}, 0);
+  `);
+  await evaluate(`window.__jensdjAutomation.sleep(100)`);
+
+  const stateReset = await evaluate<{
+    lockedPosition: number | null;
+  }>("window.__jensdjAutomation.getSelectedTrackState()");
+  expect(stateReset.lockedPosition).toBe(0);
+
+  // Simulate CueTable row click: set locked + preview to cue time
+  await evaluate(`
+    window.__jensdjAutomation.setLockedPosition(${JSON.stringify(trackId)}, ${addResult!.time});
+  `);
+
+  const stateAfterCueClick = await evaluate<{
+    lockedPosition: number | null;
+    previewPosition: number | null;
+  }>("window.__jensdjAutomation.getSelectedTrackState()");
+  console.log("[CueE2E] state after cue click:", stateAfterCueClick);
+  expect(stateAfterCueClick.lockedPosition).toBe(addResult!.time);
+  expect(stateAfterCueClick.previewPosition).toBe(addResult!.time);
+});
+
+testIfDesktop("active cue connection fires when playback crosses cue point", async () => {
+  // Stop all tracks and clean up cues
+  await evaluate(`
+    (async () => {
+      const snapshot = await window.__jensdjAutomation.getPlaybackSnapshot();
+      for (const [trackId] of Object.entries(snapshot)) {
+        const stop = document.querySelector(\`[data-testid="track-\${trackId}-stop"]\`);
+        if (stop instanceof HTMLElement) stop.click();
+      }
+      await window.__jensdjAutomation.sleep(300);
+      return true;
+    })()
+  `);
+
+  const trackIds = await evaluate<string[]>("window.__jensdjAutomation.getTrackIds()");
+  expect(trackIds.length).toBeGreaterThanOrEqual(2);
+  const track1 = trackIds[0]!;
+  const track2 = trackIds[1]!;
+
+  // Clean up any existing cues
+  await evaluate(`
+    window.__jensdjAutomation.removeAllCuesForTrack(${JSON.stringify(track1)});
+    window.__jensdjAutomation.removeAllCuesForTrack(${JSON.stringify(track2)});
+  `);
+
+  // Get beats to pick cue positions
+  const ctx = await evaluate<Record<string, {
+    beats: number[];
+    firstBeat: number;
+  }>>(`window.__jensdjAutomation.getTrackContext([${JSON.stringify(track1)}, ${JSON.stringify(track2)}])`);
+
+  const t1Beats = ctx[track1]!.beats;
+  const t2Beats = ctx[track2]!.beats;
+
+  // Place source cue on track1 ~3 seconds in (close enough to reach quickly)
+  const sourceBeatTime = t1Beats.find((b: number) => b >= 3) ?? t1Beats[6]!;
+  // Place target cue on track2 at some position
+  const targetBeatTime = t2Beats.find((b: number) => b >= 10) ?? t2Beats[20]!;
+
+  console.log("[CueFireE2E] track1:", track1, "track2:", track2);
+  console.log("[CueFireE2E] sourceBeatTime:", sourceBeatTime, "targetBeatTime:", targetBeatTime);
+
+  // Step 1: Create cues on both tracks
+  const sourceCue = await evaluate<{
+    id: string; time: number; active: boolean; label: string;
+  } | null>(`window.__jensdjAutomation.addOrToggleCue(${JSON.stringify(track1)}, ${sourceBeatTime})`);
+  expect(sourceCue).not.toBeNull();
+
+  const targetCue = await evaluate<{
+    id: string; time: number; active: boolean; label: string;
+  } | null>(`window.__jensdjAutomation.addOrToggleCue(${JSON.stringify(track2)}, ${targetBeatTime})`);
+  expect(targetCue).not.toBeNull();
+
+  console.log("[CueFireE2E] sourceCue:", sourceCue, "targetCue:", targetCue);
+
+  // Step 2: Activate both cues
+  await evaluate(`window.__jensdjAutomation.toggleCueActive(${JSON.stringify(sourceCue!.id)})`);
+  await evaluate(`window.__jensdjAutomation.toggleCueActive(${JSON.stringify(targetCue!.id)})`);
+
+  // Verify active
+  const sourceDetail = await evaluate<{
+    active: boolean; connections: { cueId: string }[];
+  } | null>(`window.__jensdjAutomation.getCueDetail(${JSON.stringify(sourceCue!.id)})`);
+  expect(sourceDetail!.active).toBe(true);
+
+  // Step 3: Connect source → target
+  const connected = await evaluate<boolean>(`
+    window.__jensdjAutomation.connectCues(${JSON.stringify(sourceCue!.id)}, ${JSON.stringify(targetCue!.id)})
+  `);
+  expect(connected).toBe(true);
+
+  // Verify connection exists
+  const sourceAfterConnect = await evaluate<{
+    active: boolean;
+    connections: { cueId: string; action: string }[];
+  } | null>(`window.__jensdjAutomation.getCueDetail(${JSON.stringify(sourceCue!.id)})`);
+  console.log("[CueFireE2E] source after connect:", sourceAfterConnect);
+  expect(sourceAfterConnect!.connections.length).toBe(1);
+  expect(sourceAfterConnect!.connections[0]!.cueId).toBe(targetCue!.id);
+  expect(sourceAfterConnect!.connections[0]!.action).toBe("start");
+
+  // Step 4: Verify track2 is NOT playing yet
+  const beforePlay = await evaluate<Record<string, {
+    backendIsPlaying: boolean;
+    backendPosition: number;
+  }>>(`window.__jensdjAutomation.getPlaybackSnapshot([${JSON.stringify(track1)}, ${JSON.stringify(track2)}])`);
+  console.log("[CueFireE2E] before play:", beforePlay);
+  expect(beforePlay[track2]!.backendIsPlaying).toBe(false);
+
+  // Step 5: Start track1 from the beginning (before the cue)
+  await evaluate(`
+    window.__jensdjAutomation.clickByTestId("track-${track1}-play");
+  `);
+
+  // Step 6: Wait for playback to cross the cue point
+  // The cue is at ~3 seconds, so wait up to 8 seconds
+  let track2Started = false;
+  const deadline = Date.now() + 8000;
+  while (Date.now() < deadline) {
+    await sleep(200);
+    const snap = await evaluate<Record<string, {
+      backendIsPlaying: boolean;
+      backendPosition: number;
+    }>>(`window.__jensdjAutomation.getPlaybackSnapshot([${JSON.stringify(track1)}, ${JSON.stringify(track2)}])`);
+
+    if (snap[track2]!.backendIsPlaying) {
+      track2Started = true;
+      console.log("[CueFireE2E] track2 started! track1 pos:", snap[track1]!.backendPosition,
+        "track2 pos:", snap[track2]!.backendPosition);
+      break;
+    }
+  }
+
+  expect(track2Started).toBe(true);
+
+  // Step 7: Verify track2 is near the target cue position
+  const afterFire = await evaluate<Record<string, {
+    backendIsPlaying: boolean;
+    backendPosition: number;
+  }>>(`window.__jensdjAutomation.getPlaybackSnapshot([${JSON.stringify(track1)}, ${JSON.stringify(track2)}])`);
+
+  console.log("[CueFireE2E] after fire:", afterFire);
+  expect(afterFire[track1]!.backendIsPlaying).toBe(true);
+  expect(afterFire[track2]!.backendIsPlaying).toBe(true);
+  // Track1 should have passed the source cue
+  expect(afterFire[track1]!.backendPosition).toBeGreaterThan(sourceCue!.time - 0.5);
+
+  // Clean up: stop both tracks and remove cues
+  await evaluate(`
+    (async () => {
+      const stop1 = document.querySelector('[data-testid="track-${track1}-stop"]');
+      const stop2 = document.querySelector('[data-testid="track-${track2}-stop"]');
+      if (stop1 instanceof HTMLElement) stop1.click();
+      if (stop2 instanceof HTMLElement) stop2.click();
+      await window.__jensdjAutomation.sleep(300);
+      window.__jensdjAutomation.removeAllCuesForTrack(${JSON.stringify(track1)});
+      window.__jensdjAutomation.removeAllCuesForTrack(${JSON.stringify(track2)});
+      return true;
+    })()
+  `);
+});

@@ -46,6 +46,8 @@ export function CueConnections({ trackLayouts }: CueConnectionsProps) {
         const cy2 = y1 + (y2 - y1) * 0.7;
 
         const isHighlighted = hoveredCueId === sourceId || hoveredCueId === targetId;
+        const isInactive = !source.active;
+        const baseOpacity = isInactive ? 0.15 : isHighlighted ? 0.9 : 0.5;
 
         return (
           <g key={`${sourceId}-${targetId}`}>
@@ -55,10 +57,10 @@ export function CueConnections({ trackLayouts }: CueConnectionsProps) {
               stroke={source.color}
               strokeWidth={isHighlighted ? 2.5 : 1.5}
               strokeDasharray="4 2"
-              opacity={isHighlighted ? 0.9 : 0.5}
+              opacity={baseOpacity}
             />
-            <circle cx={x1} cy={y1} r={isHighlighted ? 4 : 3} fill={source.color} opacity={isHighlighted ? 0.9 : 0.6} />
-            <circle cx={x2} cy={y2} r={isHighlighted ? 4 : 3} fill={target.color} opacity={isHighlighted ? 0.9 : 0.6} />
+            <circle cx={x1} cy={y1} r={isHighlighted ? 4 : 3} fill={source.color} opacity={baseOpacity} />
+            <circle cx={x2} cy={y2} r={isHighlighted ? 4 : 3} fill={target.color} opacity={baseOpacity} />
           </g>
         );
       })}

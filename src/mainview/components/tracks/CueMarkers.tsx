@@ -17,12 +17,33 @@ interface CueMarkersProps {
   containerWidth: number;
   trackId: string;
   beats?: number[];
+  downbeatOffset?: number;
   onCueDrag?: (time: number | null) => void;
+}
+
+function getDownbeats(beats: number[], downbeatOffset: number): number[] {
+  const result: number[] = [];
+  for (let i = downbeatOffset; i < beats.length; i += 4) {
+    result.push(beats[i]!);
+  }
+  return result;
+}
+
+function snapToNearestDownbeat(time: number, beats: number[], downbeatOffset: number): number {
+  const downbeats = getDownbeats(beats, downbeatOffset);
+  if (downbeats.length === 0) return time;
+  let nearest = downbeats[0]!;
+  let minDist = Infinity;
+  for (const bt of downbeats) {
+    const d = Math.abs(bt - time);
+    if (d < minDist) { minDist = d; nearest = bt; }
+  }
+  return nearest;
 }
 
 function stop(e: React.MouseEvent) { e.stopPropagation(); }
 
-export function CueMarkers({ cues, duration, containerWidth, trackId, beats, onCueDrag }: CueMarkersProps) {
+export function CueMarkers({ cues, duration, containerWidth, trackId, beats, downbeatOffset = 0, onCueDrag }: CueMarkersProps) {
   const hoveredCue = useCueStore((s) => s.hoveredCueId);
   const setHoveredCue = useCueStore((s) => s.setHoveredCueId);
   const pendingConnection = useCueStore((s) => s.pendingConnection);
@@ -122,13 +143,7 @@ export function CueMarkers({ cues, duration, containerWidth, trackId, beats, onC
         let time = pct * duration;
 
         if (beats && beats.length > 0) {
-          let nearest = beats[0] ?? 0;
-          let minDist = Infinity;
-          for (const bt of beats) {
-            const d = Math.abs(bt - time);
-            if (d < minDist) { minDist = d; nearest = bt; }
-          }
-          time = nearest;
+          time = snapToNearestDownbeat(time, beats, downbeatOffset);
         }
 
         useCueStore.getState().updateCue(state.cueId, { time });
@@ -157,7 +172,7 @@ export function CueMarkers({ cues, duration, containerWidth, trackId, beats, onC
   const timeToX = (t: number) => (t / duration) * containerWidth;
 
   return (
-    <div ref={containerElRef} className="absolute inset-0" style={{ overflow: "visible", zIndex: 10 }}>
+    <div ref={containerElRef} className="absolute inset-0 pointer-events-none" style={{ overflow: "visible", zIndex: 10 }}>
       {/* Connection target highlights on other tracks — rendered with high z-index */}
       {isPendingTarget && cues.map((cue) => {
         const x = timeToX(cue.time);
@@ -187,27 +202,31 @@ export function CueMarkers({ cues, duration, containerWidth, trackId, beats, onC
       {cues.map((cue) => {
         const x = timeToX(cue.time);
         const isHovered = hoveredCue === cue.id;
+        const markerOpacity = cue.active ? 1 : 0.35;
 
         return (
           <div key={cue.id}>
             {/* Vertical marker line + hover area */}
             <div
               className="absolute top-0 bottom-0 pointer-events-auto cursor-ew-resize"
-              style={{ left: x - 6, width: 12 }}
+              style={{ left: x - 6, width: 12, opacity: markerOpacity }}
               onMouseEnter={() => keepCueHovered(cue.id)}
               onMouseLeave={() => releaseCueHover(cue.id)}
               onMouseDown={(e) => handleCueMouseDown(e, cue)}
             >
               <div
                 className="absolute top-0 bottom-0"
-                style={{ left: 5, width: 2, backgroundColor: cue.color }}
+                style={{
+                  left: 5, width: 2, backgroundColor: cue.color,
+                  ...(cue.active ? {} : { backgroundImage: `repeating-linear-gradient(0deg, ${cue.color} 0px, ${cue.color} 3px, transparent 3px, transparent 6px)`, backgroundColor: "transparent" }),
+                }}
               />
             </div>
 
             {/* Label badge */}
             <div
               className="absolute pointer-events-auto cursor-ew-resize"
-              style={{ left: x - 1, top: 0, zIndex: 10 }}
+              style={{ left: x - 1, top: 0, zIndex: 10, opacity: markerOpacity }}
               onMouseEnter={() => keepCueHovered(cue.id)}
               onMouseLeave={() => releaseCueHover(cue.id)}
               onMouseDown={(e) => handleCueMouseDown(e, cue)}
@@ -216,12 +235,12 @@ export function CueMarkers({ cues, duration, containerWidth, trackId, beats, onC
                 className="px-1 py-px text-[8px] font-bold font-mono rounded-b leading-tight"
                 style={{ backgroundColor: cue.color, color: "#000" }}
               >
-                {cue.label}
+                {cue.active ? "●" : "○"} {cue.label}
                 {cue.connections.map((conn) => {
                   const target = allCuesMap.get(conn.cueId);
                   if (!target) return null;
                   return (
-                    <span key={conn.cueId} className="ml-0.5 opacity-70">→{target.label}:{ACTION_LABELS[conn.action]}</span>
+                    <span key={conn.id} className="ml-0.5 opacity-70">→{target.label}:{ACTION_LABELS[conn.action]}</span>
                   );
                 })}
               </div>
@@ -240,9 +259,18 @@ export function CueMarkers({ cues, duration, containerWidth, trackId, beats, onC
                   <button
                     className="block w-full text-left px-2 py-0.5 text-[9px] text-zinc-200 hover:bg-zinc-700"
                     onClick={() => {
+                      useCueStore.getState().toggleActive(cue.id);
+                      setHoveredCue(null);
+                    }}
+                  >
+                    {cue.active ? "Deactivate" : "Activate"}
+                  </button>
+                  <button
+                    className="block w-full text-left px-2 py-0.5 text-[9px] text-zinc-200 hover:bg-zinc-700"
+                    onClick={() => {
                       const trackState = usePlayerStore.getState().tracks.get(trackId);
                       const bpm = trackState?.track.bpm ?? 120;
-                      const fourBars = 4 * (60 / bpm) * 4; // 4 bars = 16 beats
+                      const fourBars = 4 * (60 / bpm) * 4;
                       window.djRpc?.request?.setLoop?.({ trackId, startSec: cue.time, endSec: cue.time + fourBars });
                       setHoveredCue(null);
                     }}
@@ -261,16 +289,21 @@ export function CueMarkers({ cues, duration, containerWidth, trackId, beats, onC
                     const target = allCuesMap.get(conn.cueId);
                     if (!target) return null;
                     return (
-                      <div key={conn.cueId} className="flex items-center px-2 py-0.5 gap-1">
+                      <div key={conn.id} className="flex items-center px-2 py-0.5 gap-1">
                         <button
                           className="text-[9px] text-amber-300 hover:bg-zinc-700 rounded px-0.5"
                           onClick={() => {
                             const idx = ACTION_ORDER.indexOf(conn.action);
                             const next = ACTION_ORDER[(idx + 1) % ACTION_ORDER.length]!;
                             const updated = cue.connections.map((c) =>
-                              c.cueId === conn.cueId ? { ...c, action: next } : c
+                              c.id === conn.id ? { ...c, action: next } : c
                             );
                             useCueStore.getState().updateCue(cue.id, { connections: updated });
+                            // Persist action change
+                            window.djRpc?.request?.saveCueConnection?.({
+                              id: conn.id, sourceCueId: cue.id, targetCueId: conn.cueId,
+                              targetFilePath: conn.targetFilePath, action: next,
+                            });
                           }}
                         >
                           →{target.label}:{ACTION_LABELS[conn.action]} ↻
@@ -278,7 +311,7 @@ export function CueMarkers({ cues, duration, containerWidth, trackId, beats, onC
                         <button
                           className="text-[9px] text-red-400 hover:bg-zinc-700 rounded px-0.5"
                           onClick={() => {
-                            useCueStore.getState().removeConnection(cue.id, conn.cueId);
+                            useCueStore.getState().removeConnection(cue.id, conn.id);
                             setHoveredCue(null);
                           }}
                         >

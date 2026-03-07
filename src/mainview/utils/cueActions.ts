@@ -4,6 +4,14 @@ import { logInfo } from "../lib/debugLog.ts";
 import { useCueStore } from "../stores/cueStore.ts";
 import { usePlayerStore } from "../stores/playerStore.ts";
 
+function findTrackIdByFilePath(filePath: string): string | null {
+  const tracks = usePlayerStore.getState().tracks;
+  for (const [id, ts] of tracks) {
+    if (ts.track.filePath === filePath) return id;
+  }
+  return null;
+}
+
 function unlockVisualFollow(trackId: string): void {
   const store = usePlayerStore.getState();
   store.setPreviewPosition(trackId, null);
@@ -17,7 +25,9 @@ export async function startConnectedCue(
 ): Promise<void> {
   const store = usePlayerStore.getState();
   const sourceTrack = store.tracks.get(sourceTrackId);
-  const targetTrack = store.tracks.get(connectedCue.trackId);
+  const targetTrackId = connectedCue.trackId || findTrackIdByFilePath(connectedCue.filePath);
+  if (!targetTrackId) return;
+  const targetTrack = store.tracks.get(targetTrackId);
 
   if (!targetTrack) return;
 
@@ -37,7 +47,7 @@ export async function startConnectedCue(
 
     if (plan) {
       const ok = await window.djRpc?.request?.syncStart?.({
-        targetTrackId: connectedCue.trackId,
+        targetTrackId,
         targetBeat: plan.targetBeat,
         sourceTrackId,
         sourceBeat: plan.sourceBeat,
@@ -46,13 +56,13 @@ export async function startConnectedCue(
       });
 
       if (ok) {
-        unlockVisualFollow(connectedCue.trackId);
-        store.setPlaying(connectedCue.trackId, true);
+        unlockVisualFollow(targetTrackId);
+        store.setPlaying(targetTrackId, true);
         logInfo("cue.startConnectedSync", {
           sourceTrackId,
           sourceCueId: sourceCue.id,
           sourceCueTime: Number(sourceCue.time.toFixed(3)),
-          targetTrackId: connectedCue.trackId,
+          targetTrackId,
           targetCueId: connectedCue.id,
           targetCueTime: Number(connectedCue.time.toFixed(3)),
         });
@@ -62,15 +72,15 @@ export async function startConnectedCue(
   }
 
   await window.djRpc?.request?.play?.({
-    trackId: connectedCue.trackId,
+    trackId: targetTrackId,
     fromTime: connectedCue.time,
   });
-  unlockVisualFollow(connectedCue.trackId);
-  store.setPlaying(connectedCue.trackId, true);
+  unlockVisualFollow(targetTrackId);
+  store.setPlaying(targetTrackId, true);
   logInfo("cue.startConnectedFallback", {
     sourceTrackId,
     sourceCueId: sourceCue.id,
-    targetTrackId: connectedCue.trackId,
+    targetTrackId,
     targetCueId: connectedCue.id,
     targetCueTime: Number(connectedCue.time.toFixed(3)),
   });
@@ -85,7 +95,6 @@ export async function activateCue(trackId: string, cue: CuePoint): Promise<void>
       logInfo("cue.activateConnected", {
         sourceTrackId: trackId,
         cueId: cue.id,
-        targetTrackId: connectedCue.trackId,
         targetCueId: connectedCue.id,
         targetTime: Number(connectedCue.time.toFixed(3)),
       });
