@@ -2,6 +2,7 @@ import { useRef, useEffect, useCallback } from "react";
 import type { Peaks3Band, CuePoint } from "../../../shared/types.ts";
 import { CueMarkers } from "./CueMarkers.tsx";
 import { debugLog, debugLogThrottled } from "../../lib/debugLog.ts";
+import { usePlayerStore } from "../../stores/playerStore.ts";
 
 interface WaveformProps {
   trackId: string;
@@ -131,19 +132,36 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
     ctx.stroke();
     ctx.shadowBlur = 0;
 
-    // Loop region highlight
-    const lp = loopPctRef.current;
-    if (lp) {
-      const lx1 = lp.start * w;
-      const lx2 = lp.end * w;
-      ctx.fillStyle = "rgba(249, 115, 22, 0.15)";
-      ctx.fillRect(lx1, 0, lx2 - lx1, h);
-      ctx.strokeStyle = "rgba(249, 115, 22, 0.6)";
-      ctx.lineWidth = 1;
-      ctx.setLineDash([3, 2]);
-      ctx.beginPath(); ctx.moveTo(lx1, 0); ctx.lineTo(lx1, h); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(lx2, 0); ctx.lineTo(lx2, h); ctx.stroke();
-      ctx.setLineDash([]);
+    // Loop regions from cue automations (always visible)
+    if (cues && duration > 0) {
+      const trackState = usePlayerStore.getState().tracks.get(trackId);
+      const bpm = trackState?.track.bpm ?? 120;
+      const beatDur = 60 / bpm;
+      const engineLoop = loopPctRef.current;
+      for (const cue of cues) {
+        const loopAuto = cue.automations.find((a) => a.type === "loop");
+        if (!loopAuto) continue;
+        const loopBeats = loopAuto.endValue > 0 ? loopAuto.endValue : 16;
+        const ls = cue.time / duration;
+        const le = (cue.time + loopBeats * beatDur) / duration;
+        const lx1 = ls * w;
+        const lx2 = le * w;
+        if (lx2 <= lx1) continue;
+        const isActive = engineLoop && Math.abs(engineLoop.start - ls) < 0.01 && Math.abs(engineLoop.end - le) < 0.01;
+        ctx.fillStyle = `rgba(249, 115, 22, ${isActive ? 0.15 : 0.07})`;
+        ctx.fillRect(lx1, 0, lx2 - lx1, h);
+        ctx.strokeStyle = `rgba(249, 115, 22, ${isActive ? 0.6 : 0.25})`;
+        ctx.lineWidth = 1;
+        ctx.setLineDash(isActive ? [3, 2] : [2, 3]);
+        ctx.beginPath(); ctx.moveTo(lx1, 0); ctx.lineTo(lx1, h); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(lx2, 0); ctx.lineTo(lx2, h); ctx.stroke();
+        ctx.setLineDash([]);
+        // Bottom bar in cue color
+        ctx.fillStyle = cue.color;
+        ctx.globalAlpha = isActive ? 0.7 : 0.35;
+        ctx.fillRect(lx1, h - 2, lx2 - lx1, 2);
+        ctx.globalAlpha = 1;
+      }
     }
 
     // Amber preview cursor
@@ -162,7 +180,7 @@ export function Waveform({ trackId, peaks, duration, beats, downbeatOffset = 0, 
     }
 
     ctx.restore();
-  }, [isPlaying]);
+  }, [isPlaying, cues, duration, trackId]);
 
   const flushOverlayDraw = useCallback(() => {
     if (animFrameRef.current) {

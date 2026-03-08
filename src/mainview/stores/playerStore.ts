@@ -12,12 +12,22 @@ export interface TrackState {
   previewPosition: number | null;
   lockedPosition: number | null; // when set, zoomed waveform stays here instead of following playback
   level: number;
+  filterValue: number;  // 0.0=full LP, 0.5=bypass, 1.0=full HP
+  filterAutomationActive: boolean;
+  volumeAutomationActive: boolean;
+  eqLo: number;
+  eqMid: number;
+  eqHi: number;
+  eqAutomationActive: boolean;
 }
 
 interface PlayerStore {
   tracks: Map<string, TrackState>;
   devices: OutputDevice[];
   masterBpm: number; // 0 = off, >0 = all tracks sync to this
+  selectedTrackId: string | null; // MIDI-selected track
+  midiConnected: boolean;
+  midiDeviceName: string | null;
 
   addTrack: (track: LoadedTrack) => void;
   removeTrack: (trackId: string) => void;
@@ -30,12 +40,17 @@ interface PlayerStore {
   setLockedPosition: (trackId: string, position: number | null) => void;
   setLevel: (trackId: string, level: number) => void;
   setMasterBpm: (bpm: number) => void;
+  setSelectedTrackId: (trackId: string | null) => void;
+  setMidiConnected: (connected: boolean, deviceName: string | null) => void;
 }
 
 export const usePlayerStore = create<PlayerStore>((set) => ({
   tracks: new Map(),
   devices: [],
   masterBpm: 0,
+  selectedTrackId: null,
+  midiConnected: false,
+  midiDeviceName: null,
 
   addTrack: (track) =>
     set((state) => {
@@ -61,6 +76,13 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
         previewPosition: null,
         lockedPosition: null,
         level: 0,
+        filterValue: 0.5,
+        filterAutomationActive: false,
+        volumeAutomationActive: false,
+        eqLo: 1,
+        eqMid: 1,
+        eqHi: 1,
+        eqAutomationActive: false,
       });
       return { tracks };
     }),
@@ -164,6 +186,11 @@ export const usePlayerStore = create<PlayerStore>((set) => ({
     }),
 
   setMasterBpm: (bpm) => set({ masterBpm: bpm }),
+
+  setSelectedTrackId: (trackId) => set({ selectedTrackId: trackId }),
+
+  setMidiConnected: (connected, deviceName) =>
+    set({ midiConnected: connected, midiDeviceName: deviceName }),
 }));
 
 // Position updates go directly to DOM via TrackRow refs (no React re-render).

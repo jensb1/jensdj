@@ -67,11 +67,14 @@ export async function syncPlay(trackId: string, options: SyncPlayOptions = {}): 
     const targetBeats = thisTrack.track.beats;
 
     if (sourceBeats.length > 4 && targetBeats.length > 4) {
-      // Auto-set master BPM if not set
-      if (store.masterBpm === 0 && source.track.metadata.bpm > 0) {
-        store.setMasterBpm(source.track.metadata.bpm);
-        await window.djRpc?.request?.setMasterBpm?.({ bpm: source.track.metadata.bpm });
+      // Auto-set master BPM if not set (prefer ID3 tag, fall back to analyzed BPM)
+      const sourceBpm = source.track.metadata.bpm > 0 ? source.track.metadata.bpm : source.track.bpm;
+      if (store.masterBpm === 0 && sourceBpm > 0) {
+        store.setMasterBpm(sourceBpm);
+        await window.djRpc?.request?.setMasterBpm?.({ bpm: sourceBpm });
       }
+
+
 
       // Get real positions from backend
       const targetState = await window.djRpc?.request?.getPlaybackState?.({ trackId });
@@ -230,7 +233,12 @@ export async function syncPlay(trackId: string, options: SyncPlayOptions = {}): 
     }
   }
 
-  // Fallback: normal play
+  // Fallback: normal play — auto-set master BPM so time-stretch is established
+  const thisBpm = thisTrack.track.metadata.bpm > 0 ? thisTrack.track.metadata.bpm : thisTrack.track.bpm;
+  if (store.masterBpm === 0 && thisBpm > 0) {
+    store.setMasterBpm(thisBpm);
+    await window.djRpc?.request?.setMasterBpm?.({ bpm: thisBpm });
+  }
   await window.djRpc?.request?.play?.({
     trackId,
     fromTime: explicitTargetAnchorPos ?? undefined,

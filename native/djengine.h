@@ -32,6 +32,9 @@ void dj_set_volume(void* sound, float volume);
 
 // EQ (3-band: lo, mid, hi — gain 0..2, 1 = unity)
 void dj_set_eq(void* sound, float lo, float mid, float hi);
+float dj_get_eq_lo(void* sound);
+float dj_get_eq_mid(void* sound);
+float dj_get_eq_hi(void* sound);
 
 // Level metering (returns RMS 0..1)
 float dj_get_level(void* sound);
@@ -40,6 +43,7 @@ float dj_get_level(void* sound);
 void dj_set_loop(void* sound, float start_seconds, float end_seconds);
 void dj_clear_loop(void* sound);
 int dj_is_looping(void* sound);
+
 
 // Scheduled sync playback
 // Schedules target_sound to start playing from target_seconds,
@@ -60,12 +64,31 @@ int dj_sync_start(void* target_sound, float target_beat,
 // Cancel a previously scheduled start (before it fires)
 int dj_cancel_scheduled_start(void* sound);
 
+// Read phase diff between two sounds in samples (both read in same call, no gap)
+// Returns the bar-phase difference in seconds. 0.0 = perfect sync.
+float dj_get_sync_diff(void* sound1, void* sound2, float beat_ref, float bar_duration);
+
 // Time-stretching (Rubber Band — preserves pitch)
 // ratio: 1.0 = original tempo, 1.05 = 5% faster, 0.95 = 5% slower
 void dj_set_tempo(void* sound, float ratio);
 float dj_get_tempo(void* sound);
 void dj_set_original_bpm(void* sound, float bpm);
 float dj_get_original_bpm(void* sound);
+
+// DJ filter (single knob: 0.0 = full LP, 0.5 = bypass, 1.0 = full HP)
+void dj_set_filter(void* sound, float value);
+float dj_get_filter(void* sound);
+
+// Parameter automation (sample-rate interpolation)
+// param: 0=filter, 1=volume
+// interp: 0=linear, 1=easeIn, 2=easeOut
+// duration_seconds: 0 = immediate
+void dj_set_automation(void* sound, int param, float start_val, float end_val,
+                       float duration_seconds, int interp);
+void dj_cancel_automation(void* sound, int param);
+// Returns current progress 0..1 (-1 if no automation active for param)
+float dj_get_automation_value(void* sound, int param);
+int dj_is_automation_active(void* sound, int param);
 
 // Waveform peaks extraction
 // Decodes the file and writes num_points peak values (0..1) into out_peaks.

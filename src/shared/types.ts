@@ -58,15 +58,31 @@ export interface BeatConnection {
   targetBeat: number;
 }
 
-// Cue / marker point
-export type ConnectionAction = 'start' | 'stop' | 'loop';
+// Cue automation types
+export type AutomationType = 'filter' | 'eq_lo' | 'eq_mid' | 'eq_hi' | 'stop' | 'connect' | 'loop';
+export type AutomationInterpolation = 'linear' | 'easeIn' | 'easeOut';
 
-export interface CueConnection {
-  id: string;              // persistent UUID
-  cueId: string;           // target cue persistent UUID
-  targetFilePath: string;  // stable file reference for auto-load
-  action: ConnectionAction;
+export interface CueAutomation {
+  id: string;
+  type: AutomationType;
+  durationBars: number;            // 0 = immediate, N = over N bars
+  interpolation: AutomationInterpolation;
+  startValue: number;              // filter: 0..1 (0=LP, 0.5=bypass, 1=HP), EQ: 0..2 (1=unity)
+  endValue: number;
+  // Connect type only:
+  targetCueId?: string;
+  targetFilePath?: string;
 }
+
+// C engine param constants (must match djengine.c)
+export const DJ_PARAM_FILTER = 0;
+export const DJ_PARAM_VOLUME = 1;
+export const DJ_PARAM_EQ_LO = 2;
+export const DJ_PARAM_EQ_MID = 3;
+export const DJ_PARAM_EQ_HI = 4;
+export const DJ_INTERP_LINEAR = 0;
+export const DJ_INTERP_EASE_IN = 1;
+export const DJ_INTERP_EASE_OUT = 2;
 
 export interface CuePoint {
   id: string;              // persistent UUID
@@ -76,7 +92,7 @@ export interface CuePoint {
   time: number;            // seconds, snapped to beat
   color: string;
   active: boolean;
-  connections: CueConnection[];  // linked cues on other tracks
+  automations: CueAutomation[];
 }
 
 // Persisted track in the DJ collection
@@ -191,6 +207,18 @@ export type MainViewRPC = {
         params: { trackId: string };
         response: PlaybackState;
       };
+      getSyncDiff: {
+        params: { trackId1: string; trackId2: string; beatRef: number; barDuration: number };
+        response: number;
+      };
+      getPlaybackStates: {
+        params: { trackIds: string[] };
+        response: Record<string, PlaybackState>;
+      };
+      getTempoInfo: {
+        params: { trackIds: string[] };
+        response: Record<string, { originalBpm: number; tempoRatio: number; masterBpm: number }>;
+      };
       openFileDialog: {
         params: Record<string, never>;
         response: string[];
@@ -219,13 +247,29 @@ export type MainViewRPC = {
         params: { cueId: string };
         response: void;
       };
-      saveCueConnection: {
-        params: { id: string; sourceCueId: string; targetCueId: string; targetFilePath: string; action: string };
+      saveCueAutomation: {
+        params: { id: string; cueId: string; type: string; durationBars: number; interpolation: string; startValue: number; endValue: number; targetCueId?: string; targetFilePath?: string };
         response: void;
       };
-      deleteCueConnection: {
-        params: { connectionId: string };
+      deleteCueAutomation: {
+        params: { automationId: string };
         response: void;
+      };
+      setAutomation: {
+        params: { trackId: string; param: number; startVal: number; endVal: number; durationSeconds: number; interp: number };
+        response: void;
+      };
+      cancelAutomation: {
+        params: { trackId: string; param: number };
+        response: void;
+      };
+      isAutomationActive: {
+        params: { trackId: string; param: number };
+        response: boolean;
+      };
+      getAutomationValue: {
+        params: { trackId: string; param: number };
+        response: number;
       };
       saveCollectionTrack: {
         params: { filePath: string; title: string; artist: string; album: string; genre: string; duration: number; bpm: number; key: string; peaks: Peaks3Band | null; beats: number[] | null };
@@ -260,6 +304,13 @@ export type MainViewRPC = {
         level: number;
         loopStart?: number;
         loopEnd?: number;
+        filterValue?: number;
+        filterAutomationActive?: boolean;
+        volumeAutomationActive?: boolean;
+        eqLo?: number;
+        eqMid?: number;
+        eqHi?: number;
+        eqAutomationActive?: boolean;
       };
       scanProgress: {
         current: number;

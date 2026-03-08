@@ -103,13 +103,14 @@ export function MainLayout() {
     });
     // Auto-load two test tracks for faster testing
     const autoLoad = async () => {
-      const testPath = "/Volumes/MUSIC/all/acid pauli - nana.mp3";
+      const testPath1 = "/Users/jensberlips/Development/jensdj/test-assets/beat100.mp3";
+      const testPath2 = "/Users/jensberlips/Development/jensdj/test-assets/beat125.mp3";
       try {
-        const t1 = await window.djRpc?.request?.loadTrack?.({ filePath: testPath });
+        const t1 = await window.djRpc?.request?.loadTrack?.({ filePath: testPath1 });
         if (t1) addTrackAndLoadCues(t1);
-        const t2 = await window.djRpc?.request?.loadTrack?.({ filePath: testPath });
+        const t2 = await window.djRpc?.request?.loadTrack?.({ filePath: testPath2 });
         if (t2) addTrackAndLoadCues(t2);
-        logInfo("library.autoLoad", { count: 2, filePath: testPath });
+        logInfo("library.autoLoad", { count: 2, tracks: [testPath1, testPath2] });
       } catch (e) {
         logWarn("library.autoLoadFailed", { error: String(e) });
       }
@@ -154,7 +155,7 @@ export function MainLayout() {
   const handleLoadTestTrack = async () => {
     setLoading(true);
     try {
-      const filePath = "/Volumes/MUSIC/all/acid pauli - nana.mp3";
+      const filePath = "/Users/jensberlips/Development/jensdj/test-assets/beat100.mp3";
       const track = await window.djRpc?.request?.loadTrack?.({ filePath });
       if (track) addTrackAndLoadCues(track);
     } catch (e) {

@@ -17,11 +17,13 @@ export function CueConnections({ trackLayouts }: CueConnectionsProps) {
   const cues = useCueStore((s) => s.cues);
   const hoveredCueId = useCueStore((s) => s.hoveredCueId);
 
-  // Collect all connection lines (deduplicated)
+  // Collect all connection lines from connect-type automations
   const lines: { sourceId: string; targetId: string }[] = [];
   for (const [, cue] of cues) {
-    for (const conn of cue.connections) {
-      lines.push({ sourceId: cue.id, targetId: conn.cueId });
+    for (const auto of cue.automations) {
+      if (auto.type === "connect" && auto.targetCueId) {
+        lines.push({ sourceId: cue.id, targetId: auto.targetCueId });
+      }
     }
   }
 

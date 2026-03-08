@@ -18,6 +18,9 @@ import {
   djIsPlaying,
   djSetVolume,
   djSetEQ,
+  djGetEqLo,
+  djGetEqMid,
+  djGetEqHi,
   djGetLevel,
   djSetTempo,
   djGetTempo,
@@ -26,9 +29,18 @@ import {
   djScheduleSyncPlay,
   djSyncStart,
   djCancelScheduledStart,
+  djGetSyncDiff,
   djSetLoop,
   djClearLoop,
   djIsLooping,
+  djSetFilter,
+  djGetFilter,
+  djSetAutomation,
+  djCancelAutomation,
+  djGetAutomationValue,
+  djIsAutomationActive,
+  DJ_PARAM_FILTER,
+  DJ_PARAM_VOLUME,
   djGetPeaks3Band,
   djDetectBpm,
   djDetectBeats,
@@ -98,6 +110,7 @@ export class AudioEngine {
   private nextId = 1;
   private initialized = false;
   private _masterBpm = 0;
+  get masterBpm(): number { return this._masterBpm; }
   private _activeLoops = new Map<string, { start: number; end: number }>();
 
   init(): boolean {
@@ -364,6 +377,13 @@ export class AudioEngine {
     djCancelScheduledStart(track.soundPtr);
   }
 
+  getSyncDiff(trackId1: string, trackId2: string, beatRef: number, barDuration: number): number {
+    const t1 = this.tracks.get(trackId1);
+    const t2 = this.tracks.get(trackId2);
+    if (!t1 || !t2) return 0;
+    return djGetSyncDiff(t1.soundPtr, t2.soundPtr, beatRef, barDuration);
+  }
+
   setLoop(trackId: string, startSec: number, endSec: number): void {
     const track = this.tracks.get(trackId);
     if (!track) return;
@@ -400,10 +420,62 @@ export class AudioEngine {
     }
   }
 
+  setFilter(trackId: string, value: number): void {
+    const track = this.tracks.get(trackId);
+    if (!track) return;
+    djSetFilter(track.soundPtr, value);
+  }
+
+  getFilter(trackId: string): number {
+    const track = this.tracks.get(trackId);
+    if (!track) return 0.5;
+    return djGetFilter(track.soundPtr);
+  }
+
+  getEQ(trackId: string): { lo: number; mid: number; hi: number } {
+    const track = this.tracks.get(trackId);
+    if (!track) return { lo: 1, mid: 1, hi: 1 };
+    return {
+      lo: djGetEqLo(track.soundPtr),
+      mid: djGetEqMid(track.soundPtr),
+      hi: djGetEqHi(track.soundPtr),
+    };
+  }
+
+  setAutomation(trackId: string, param: number, startVal: number, endVal: number, durationSeconds: number, interp: number): void {
+    const track = this.tracks.get(trackId);
+    if (!track) return;
+    djSetAutomation(track.soundPtr, param, startVal, endVal, durationSeconds, interp);
+  }
+
+  cancelAutomation(trackId: string, param: number): void {
+    const track = this.tracks.get(trackId);
+    if (!track) return;
+    djCancelAutomation(track.soundPtr, param);
+  }
+
+  getAutomationValue(trackId: string, param: number): number {
+    const track = this.tracks.get(trackId);
+    if (!track) return -1;
+    return djGetAutomationValue(track.soundPtr, param);
+  }
+
+  isAutomationActive(trackId: string, param: number): boolean {
+    const track = this.tracks.get(trackId);
+    if (!track) return false;
+    return djIsAutomationActive(track.soundPtr, param);
+  }
+
   getOriginalBpm(trackId: string): number {
     const track = this.tracks.get(trackId);
     if (!track) return 0;
     return djGetOriginalBpm(track.soundPtr);
+  }
+
+  getTempoRatio(trackId: string): number {
+    const track = this.tracks.get(trackId);
+    if (!track) return 1;
+    return djGetTempo(track.soundPtr);
   }
 
   getAllTrackIds(): string[] {

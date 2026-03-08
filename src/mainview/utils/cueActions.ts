@@ -87,9 +87,10 @@ export async function startConnectedCue(
 }
 
 export async function activateCue(trackId: string, cue: CuePoint): Promise<void> {
-  if (cue.connections.length > 0) {
-    for (const conn of cue.connections) {
-      const connectedCue = useCueStore.getState().cues.get(conn.cueId);
+  const connectAutos = cue.automations.filter((a) => a.type === "connect" && a.targetCueId);
+  if (connectAutos.length > 0) {
+    for (const auto of connectAutos) {
+      const connectedCue = useCueStore.getState().cues.get(auto.targetCueId!);
       if (!connectedCue) continue;
       await startConnectedCue(trackId, cue, connectedCue);
       logInfo("cue.activateConnected", {

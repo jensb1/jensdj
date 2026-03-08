@@ -550,7 +550,7 @@ testIfDesktop("active cue connection fires when playback crosses cue point", asy
 
   // Verify active
   const sourceDetail = await evaluate<{
-    active: boolean; connections: { cueId: string }[];
+    active: boolean; automations: { type: string; targetCueId?: string }[];
   } | null>(`window.__jensdjAutomation.getCueDetail(${JSON.stringify(sourceCue!.id)})`);
   expect(sourceDetail!.active).toBe(true);
 
@@ -560,15 +560,15 @@ testIfDesktop("active cue connection fires when playback crosses cue point", asy
   `);
   expect(connected).toBe(true);
 
-  // Verify connection exists
+  // Verify connection automation exists
   const sourceAfterConnect = await evaluate<{
     active: boolean;
-    connections: { cueId: string; action: string }[];
+    automations: { type: string; targetCueId?: string }[];
   } | null>(`window.__jensdjAutomation.getCueDetail(${JSON.stringify(sourceCue!.id)})`);
   console.log("[CueFireE2E] source after connect:", sourceAfterConnect);
-  expect(sourceAfterConnect!.connections.length).toBe(1);
-  expect(sourceAfterConnect!.connections[0]!.cueId).toBe(targetCue!.id);
-  expect(sourceAfterConnect!.connections[0]!.action).toBe("start");
+  expect(sourceAfterConnect!.automations.length).toBe(1);
+  expect(sourceAfterConnect!.automations[0]!.targetCueId).toBe(targetCue!.id);
+  expect(sourceAfterConnect!.automations[0]!.type).toBe("connect");
 
   // Step 4: Verify track2 is NOT playing yet
   const beforePlay = await evaluate<Record<string, {
@@ -626,6 +626,383 @@ testIfDesktop("active cue connection fires when playback crosses cue point", asy
       await window.__jensdjAutomation.sleep(300);
       window.__jensdjAutomation.removeAllCuesForTrack(${JSON.stringify(track1)});
       window.__jensdjAutomation.removeAllCuesForTrack(${JSON.stringify(track2)});
+      return true;
+    })()
+  `);
+});
+
+testIfDesktop("EQ automation triggers and changes parameter value", async () => {
+  // Stop all tracks first
+  await evaluate(`
+    (async () => {
+      const snapshot = await window.__jensdjAutomation.getPlaybackSnapshot();
+      for (const [trackId] of Object.entries(snapshot)) {
+        const stop = document.querySelector(\`[data-testid="track-\${trackId}-stop"]\`);
+        if (stop instanceof HTMLElement) stop.click();
+      }
+      await window.__jensdjAutomation.sleep(300);
+      return true;
+    })()
+  `);
+
+  const trackIds = await evaluate<string[]>("window.__jensdjAutomation.getTrackIds()");
+  expect(trackIds.length).toBeGreaterThanOrEqual(1);
+  const trackId = trackIds[0]!;
+
+  // Clean up existing cues
+  await evaluate(`window.__jensdjAutomation.removeAllCuesForTrack(${JSON.stringify(trackId)})`);
+
+  // Get beats
+  const ctx = await evaluate<Record<string, { beats: number[]; firstBeat: number }>>(`
+    window.__jensdjAutomation.getTrackContext([${JSON.stringify(trackId)}])
+  `);
+  const beats = ctx[trackId]!.beats;
+  // Place cue ~2 seconds in
+  const cueTime = beats.find((b: number) => b >= 2) ?? beats[4]!;
+  console.log("[EqAutoE2E] trackId:", trackId, "cueTime:", cueTime);
+
+  // Create cue
+  const cue = await evaluate<{ id: string; time: number } | null>(`
+    window.__jensdjAutomation.addOrToggleCue(${JSON.stringify(trackId)}, ${cueTime})
+  `);
+  expect(cue).not.toBeNull();
+
+  // Add EQ Lo automation: 1.0 → 0.0 over 2 bars (kill bass)
+  const autoId = await evaluate<string | null>(`
+    window.__jensdjAutomation.addCueAutomation(${JSON.stringify(cue!.id)}, "eq_lo", 2, 1.0, 0.0, "linear")
+  `);
+  expect(autoId).not.toBeNull();
+  console.log("[EqAutoE2E] automation id:", autoId);
+
+  // Activate cue
+  await evaluate(`window.__jensdjAutomation.toggleCueActive(${JSON.stringify(cue!.id)})`);
+
+  // Verify cue detail
+  const detail = await evaluate<{
+    active: boolean;
+    automations: { id: string; type: string; durationBars: number }[];
+  } | null>(`window.__jensdjAutomation.getCueDetail(${JSON.stringify(cue!.id)})`);
+  console.log("[EqAutoE2E] cue detail:", detail);
+  expect(detail!.active).toBe(true);
+  expect(detail!.automations.length).toBe(1);
+  expect(detail!.automations[0]!.type).toBe("eq_lo");
+
+  // Check EQ LO automation is NOT active before playback
+  const beforePlay = await evaluate<{ active: boolean; value: number }>(`
+    window.__jensdjAutomation.getAutomationState(${JSON.stringify(trackId)}, 2)
+  `);
+  console.log("[EqAutoE2E] before play automation state:", beforePlay);
+  expect(beforePlay.active).toBe(false);
+
+  // Start playback
+  await evaluate(`window.__jensdjAutomation.clickByTestId("track-${trackId}-play")`);
+
+  // Wait for playback to cross the cue and automation to become active
+  let automationFired = false;
+  let automationValue = -1;
+  const deadline = Date.now() + 10000;
+  while (Date.now() < deadline) {
+    await sleep(150);
+    const snap = await evaluate<Record<string, { backendPosition: number }>>(`
+      window.__jensdjAutomation.getPlaybackSnapshot([${JSON.stringify(trackId)}])
+    `);
+    const pos = snap[trackId]!.backendPosition;
+
+    if (pos > cueTime + 0.1) {
+      // We've passed the cue — check automation state
+      const state = await evaluate<{ active: boolean; value: number }>(`
+        window.__jensdjAutomation.getAutomationState(${JSON.stringify(trackId)}, 2)
+      `);
+      console.log("[EqAutoE2E] pos:", pos.toFixed(3), "automation:", state);
+
+      if (state.active) {
+        automationFired = true;
+        automationValue = state.value;
+        break;
+      }
+      // If automation already completed (very short duration), the value should be at endValue
+      // Check if it completed by seeing if we're past the expected duration
+      const bpm = 120; // fallback
+      const twoBarsSeconds = 2 * 4 * (60 / bpm);
+      if (pos > cueTime + twoBarsSeconds + 0.5) {
+        console.log("[EqAutoE2E] automation may have completed already");
+        break;
+      }
+    }
+  }
+
+  console.log("[EqAutoE2E] automationFired:", automationFired, "value:", automationValue);
+  expect(automationFired).toBe(true);
+  // Value should be between 0 and 1 (transitioning from 1.0 to 0.0)
+  expect(automationValue).toBeGreaterThanOrEqual(0);
+  expect(automationValue).toBeLessThan(1);
+
+  // Clean up
+  await evaluate(`
+    (async () => {
+      const stop = document.querySelector('[data-testid="track-${trackId}-stop"]');
+      if (stop instanceof HTMLElement) stop.click();
+      await window.__jensdjAutomation.sleep(300);
+      window.__jensdjAutomation.removeAllCuesForTrack(${JSON.stringify(trackId)});
+      return true;
+    })()
+  `);
+});
+
+testIfDesktop("1-bar and 2-bar loops via cue automations stay phase-locked", async () => {
+  // Stop all tracks
+  await evaluate(`
+    (async () => {
+      const snapshot = await window.__jensdjAutomation.getPlaybackSnapshot();
+      for (const [trackId] of Object.entries(snapshot)) {
+        const stop = document.querySelector(\`[data-testid="track-\${trackId}-stop"]\`);
+        if (stop instanceof HTMLElement) stop.click();
+      }
+      await window.__jensdjAutomation.sleep(500);
+      return true;
+    })()
+  `);
+
+  const trackIds = await evaluate<string[]>("window.__jensdjAutomation.getTrackIds()");
+  expect(trackIds.length).toBeGreaterThanOrEqual(2);
+  const t1 = trackIds[0]!;
+  const t2 = trackIds[1]!;
+
+  // Clean ALL existing cues
+  await evaluate(`
+    window.__jensdjAutomation.removeAllCuesForTrack(${JSON.stringify(t1)});
+    window.__jensdjAutomation.removeAllCuesForTrack(${JSON.stringify(t2)});
+  `);
+
+  // Get beat grid to find a good cue position (downbeat ~2s in)
+  const ctx = await evaluate<Record<string, { beats: number[]; firstBeat: number }>>(`
+    window.__jensdjAutomation.getTrackContext([${JSON.stringify(t1)}, ${JSON.stringify(t2)}])
+  `);
+  const beats1 = ctx[t1]!.beats;
+  const beatInterval = beats1.length > 1 ? beats1[1]! - beats1[0]! : 0.5;
+  const barDuration = beatInterval * 4;
+
+  // Find a downbeat ~2s in for the cue/loop position
+  let cueTime = beats1[0]!;
+  for (let i = 0; i < beats1.length; i += 4) {
+    if (beats1[i]! >= 2.0) { cueTime = beats1[i]!; break; }
+  }
+
+  console.log("[LoopSyncE2E] t1:", t1, "t2:", t2);
+  console.log("[LoopSyncE2E] cueTime:", cueTime, "barDuration:", barDuration.toFixed(4));
+
+  // Step 1: Create cue points on both tracks at the same time
+  const cue1 = await evaluate<{ id: string; time: number } | null>(`
+    window.__jensdjAutomation.addOrToggleCue(${JSON.stringify(t1)}, ${cueTime})
+  `);
+  const cue2 = await evaluate<{ id: string; time: number } | null>(`
+    window.__jensdjAutomation.addOrToggleCue(${JSON.stringify(t2)}, ${cueTime})
+  `);
+  expect(cue1).not.toBeNull();
+  expect(cue2).not.toBeNull();
+  console.log("[LoopSyncE2E] cue1:", cue1, "cue2:", cue2);
+
+  // Step 2: Add loop automations — track 1: 1 bar (4 beats), track 2: 2 bars (8 beats)
+  const auto1 = await evaluate<string | null>(`
+    window.__jensdjAutomation.addCueAutomation(${JSON.stringify(cue1!.id)}, "loop", 0, 0, 4)
+  `);
+  const auto2 = await evaluate<string | null>(`
+    window.__jensdjAutomation.addCueAutomation(${JSON.stringify(cue2!.id)}, "loop", 0, 0, 8)
+  `);
+  expect(auto1).not.toBeNull();
+  expect(auto2).not.toBeNull();
+
+  // Step 3: Activate both cues (so CueMonitor fires the loop automations)
+  await evaluate(`window.__jensdjAutomation.toggleCueActive(${JSON.stringify(cue1!.id)})`);
+  await evaluate(`window.__jensdjAutomation.toggleCueActive(${JSON.stringify(cue2!.id)})`);
+
+  // Verify
+  const detail1 = await evaluate<{ active: boolean; automations: { type: string }[] } | null>(`
+    window.__jensdjAutomation.getCueDetail(${JSON.stringify(cue1!.id)})
+  `);
+  const detail2 = await evaluate<{ active: boolean; automations: { type: string }[] } | null>(`
+    window.__jensdjAutomation.getCueDetail(${JSON.stringify(cue2!.id)})
+  `);
+  console.log("[LoopSyncE2E] cue1 detail:", detail1);
+  console.log("[LoopSyncE2E] cue2 detail:", detail2);
+  expect(detail1!.active).toBe(true);
+  expect(detail1!.automations[0]!.type).toBe("loop");
+  expect(detail2!.active).toBe(true);
+  expect(detail2!.automations[0]!.type).toBe("loop");
+
+  // Step 4: Click play on track 1 (CueMonitor will fire the loop when playback crosses the cue)
+  await evaluate(`window.__jensdjAutomation.clickByTestId("track-${t1}-play")`);
+
+  // Wait for track 1 to be playing
+  await waitFor(async () => {
+    const snap = await evaluate<Record<string, { backendIsPlaying: boolean }>>(`
+      window.__jensdjAutomation.getPlaybackSnapshot([${JSON.stringify(t1)}])
+    `);
+    return snap[t1]?.backendIsPlaying === true;
+  }, 5000, 100);
+
+  // Wait for track 1 to cross the cue and enter the loop
+  await sleep(3000);
+
+  // Step 5: Click play on track 2
+  await evaluate(`window.__jensdjAutomation.clickByTestId("track-${t2}-play")`);
+
+  // Wait for track 2 to be playing
+  await waitFor(async () => {
+    const snap = await evaluate<Record<string, { backendIsPlaying: boolean }>>(`
+      window.__jensdjAutomation.getPlaybackSnapshot([${JSON.stringify(t2)}])
+    `);
+    return snap[t2]?.backendIsPlaying === true;
+  }, 5000, 100);
+
+  // Wait for track 2 to cross its cue and enter the loop
+  await sleep(3000);
+
+  // Step 6: Sample sync diff using output-frame phase tracking (exact integer math)
+  const diffs: number[] = [];
+  for (let i = 0; i < 20; i++) {
+    await sleep(300);
+    const diff = await evaluate<number>(`
+      window.__jensdjAutomation.getSyncDiff(${JSON.stringify(t1)}, ${JSON.stringify(t2)}, 0, ${barDuration})
+    `);
+    diffs.push(Math.abs(diff));
+    console.log(`[LoopSyncE2E] #${i}: syncDiff=${(diff * 1000).toFixed(3)}ms`);
+  }
+
+  const laterDiffs = diffs.slice(3);
+  const maxDrift = Math.max(...laterDiffs);
+  console.log(`[LoopSyncE2E] maxDrift=${(maxDrift * 1000).toFixed(3)}ms`);
+
+  // Output-frame phase tracking: should be 0 samples (both tracks updated in same callback)
+  expect(maxDrift).toBeLessThan(0.001);
+
+  // Clean up
+  await evaluate(`
+    (async () => {
+      const stop1 = document.querySelector('[data-testid="track-${t1}-stop"]');
+      const stop2 = document.querySelector('[data-testid="track-${t2}-stop"]');
+      if (stop1 instanceof HTMLElement) stop1.click();
+      if (stop2 instanceof HTMLElement) stop2.click();
+      await window.__jensdjAutomation.sleep(300);
+      window.__jensdjAutomation.removeAllCuesForTrack(${JSON.stringify(t1)});
+      window.__jensdjAutomation.removeAllCuesForTrack(${JSON.stringify(t2)});
+      return true;
+    })()
+  `);
+});
+
+testIfDesktop("synced tracks with different BPMs scroll at same visual rate", async () => {
+  // Stop all tracks and reset masterBpm
+  await evaluate(`
+    (async () => {
+      const snapshot = await window.__jensdjAutomation.getPlaybackSnapshot();
+      for (const [trackId] of Object.entries(snapshot)) {
+        const stop = document.querySelector(\`[data-testid="track-\${trackId}-stop"]\`);
+        if (stop instanceof HTMLElement) stop.click();
+      }
+      await window.__jensdjAutomation.sleep(500);
+      return true;
+    })()
+  `);
+
+  const trackIds = await evaluate<string[]>("window.__jensdjAutomation.getTrackIds()");
+  expect(trackIds.length).toBeGreaterThanOrEqual(2);
+  const t1 = trackIds[0]!;
+  const t2 = trackIds[1]!;
+
+  // Use getTrackContext which has beats — derive BPM from beat spacing
+  const ctx = await evaluate<Record<string, {
+    beats: number[];
+    firstBeat: number;
+  }>>(`window.__jensdjAutomation.getTrackContext([${JSON.stringify(t1)}, ${JSON.stringify(t2)}])`);
+
+  const beats1 = ctx[t1]!.beats;
+  const beats2 = ctx[t2]!.beats;
+  expect(beats1.length).toBeGreaterThan(4);
+  expect(beats2.length).toBeGreaterThan(4);
+
+  // Derive BPM from beat spacing
+  const bpm1 = 60 / (beats1[1]! - beats1[0]!);
+  const bpm2 = 60 / (beats2[1]! - beats2[0]!);
+  console.log(`[ScrollRateE2E] bpm1=${bpm1.toFixed(1)} bpm2=${bpm2.toFixed(1)}`);
+
+  // Skip if BPMs are too similar — test only makes sense with different BPMs
+  const bpmRatio = Math.max(bpm1, bpm2) / Math.min(bpm1, bpm2);
+  if (bpmRatio < 1.05) {
+    console.log("[ScrollRateE2E] SKIP: BPMs too similar");
+    return;
+  }
+
+  // Step 1: Play track 1 (auto-sets masterBpm)
+  await evaluate(`window.__jensdjAutomation.clickByTestId("track-${t1}-play")`);
+  await sleep(1000);
+
+  // Step 2: Play track 2 (syncs to track 1)
+  await evaluate(`window.__jensdjAutomation.clickByTestId("track-${t2}-play")`);
+  await sleep(1000);
+
+  // Step 3: Verify tempo is applied in the C engine
+  const tempoInfo = await evaluate<Record<string, {
+    originalBpm: number;
+    tempoRatio: number;
+    masterBpm: number;
+  }>>(`window.djRpc.request.getTempoInfo({ trackIds: [${JSON.stringify(t1)}, ${JSON.stringify(t2)}] })`);
+  console.log("[ScrollRateE2E] tempoInfo:", tempoInfo);
+
+  expect(tempoInfo[t1]!.masterBpm).toBeGreaterThan(0);
+
+  // The tempo ratio should match: for each track, ratio = masterBpm / originalBpm
+  const expectedRatio1 = tempoInfo[t1]!.masterBpm / tempoInfo[t1]!.originalBpm;
+  const expectedRatio2 = tempoInfo[t2]!.masterBpm / tempoInfo[t2]!.originalBpm;
+  expect(Math.abs(tempoInfo[t1]!.tempoRatio - expectedRatio1)).toBeLessThan(0.02);
+  expect(Math.abs(tempoInfo[t2]!.tempoRatio - expectedRatio2)).toBeLessThan(0.02);
+
+  // Step 4: Sample positions at two time points to verify scroll rate
+  const snap1 = await evaluate<Record<string, {
+    backendPosition: number;
+    backendIsPlaying: boolean;
+  }>>(`window.__jensdjAutomation.getPlaybackSnapshot([${JSON.stringify(t1)}, ${JSON.stringify(t2)}])`);
+
+  await sleep(2000);
+
+  const snap2 = await evaluate<Record<string, {
+    backendPosition: number;
+    backendIsPlaying: boolean;
+  }>>(`window.__jensdjAutomation.getPlaybackSnapshot([${JSON.stringify(t1)}, ${JSON.stringify(t2)}])`);
+
+  expect(snap1[t1]!.backendIsPlaying).toBe(true);
+  expect(snap1[t2]!.backendIsPlaying).toBe(true);
+
+  const delta1 = snap2[t1]!.backendPosition - snap1[t1]!.backendPosition;
+  const delta2 = snap2[t2]!.backendPosition - snap1[t2]!.backendPosition;
+
+  console.log(`[ScrollRateE2E] delta1=${delta1.toFixed(4)}s delta2=${delta2.toFixed(4)}s`);
+  console.log(`[ScrollRateE2E] delta_ratio=${(delta2/delta1).toFixed(4)} expected_ratio=${(bpm1/bpm2).toFixed(4)}`);
+
+  // Key assertion: both tracks should advance at a rate proportional to their BPMs.
+  // If track 2 is stretched, delta2/delta1 should equal bpm1/bpm2.
+  // Without stretch, delta2/delta1 ≈ 1.0 (both advance at file rate).
+  // With correct stretch, delta2/delta1 ≈ bpm1/bpm2.
+  //
+  // The "visual scroll rate" in a beat-based zoom is:
+  //   scroll_rate = delta * bpm / (zoomBeats * 60)
+  // For both to be equal: delta1 * bpm1 = delta2 * bpm2
+  // i.e., delta2/delta1 = bpm1/bpm2
+  const actualDeltaRatio = delta2 / delta1;
+  const expectedDeltaRatio = bpm1 / bpm2;
+  const tolerance = 0.05; // 5% tolerance for timing jitter
+
+  console.log(`[ScrollRateE2E] actualDeltaRatio=${actualDeltaRatio.toFixed(4)} expectedDeltaRatio=${expectedDeltaRatio.toFixed(4)} tolerance=${tolerance}`);
+  expect(Math.abs(actualDeltaRatio - expectedDeltaRatio)).toBeLessThan(tolerance);
+
+  // Clean up
+  await evaluate(`
+    (async () => {
+      const stop1 = document.querySelector('[data-testid="track-${t1}-stop"]');
+      const stop2 = document.querySelector('[data-testid="track-${t2}-stop"]');
+      if (stop1 instanceof HTMLElement) stop1.click();
+      if (stop2 instanceof HTMLElement) stop2.click();
+      await window.__jensdjAutomation.sleep(300);
       return true;
     })()
   `);

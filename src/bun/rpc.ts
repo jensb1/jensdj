@@ -4,8 +4,10 @@ import { AudioEngine } from "./audio/engine.ts";
 import { initDB } from "./library/db.ts";
 import { handleAutomationResult } from "./automation.ts";
 import { createRpcRequestHandlers } from "./rpcCore.ts";
+import { MidiController } from "./midi/controller.ts";
 
 const engine = new AudioEngine();
+let midiController: MidiController | null = null;
 
 export function initEngine() {
   engine.init();
@@ -13,6 +15,7 @@ export function initEngine() {
 }
 
 export function shutdownEngine() {
+  midiController?.shutdown();
   engine.shutdown();
 }
 
@@ -20,13 +23,23 @@ export function shutdownEngine() {
 let webviewRef: any = null;
 
 export function createRPC() {
+  const coreHandlers = createRpcRequestHandlers(engine, {
+    sendPlaybackTick: (payload) => webviewRef?.rpc?.send?.playbackTick?.(payload),
+    sendScanProgress: (payload) => webviewRef?.rpc?.send?.scanProgress?.(payload),
+  });
+
   return BrowserView.defineRPC<MainViewRPC>({
     maxRequestTime: 120000,
     handlers: {
-      requests: createRpcRequestHandlers(engine, {
-        sendPlaybackTick: (payload) => webviewRef?.rpc?.send?.playbackTick?.(payload),
-        sendScanProgress: (payload) => webviewRef?.rpc?.send?.scanProgress?.(payload),
-      }),
+      requests: {
+        ...coreHandlers,
+        getMidiDevices: () => {
+          return midiController?.getDevices() ?? { sources: [], destinations: [] };
+        },
+        openMidiInput: ({ sourceIndex }: { sourceIndex: number }) => {
+          return midiController?.openInput(sourceIndex) ?? false;
+        },
+      },
       messages: {
         logToBun: ({ msg }) => {
           console.log("[WebView]", msg);
@@ -43,9 +56,22 @@ export function createRPC() {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function startPlaybackTicker(webview: any, intervalMs = 16) {
   webviewRef = webview;
+
+  // Initialize MIDI controller
+  const sendToWebview = (msg: string, payload: Record<string, unknown>) => {
+    const send = webview?.rpc?.send;
+    if (send && typeof send[msg] === "function") {
+      send[msg](payload);
+    }
+  };
+  midiController = new MidiController(engine, sendToWebview);
+  midiController.init();
+
   let logCounter = 0;
   const lastSnapshots = new Map<string, { position: number; isPlaying: boolean }>();
   return setInterval(() => {
+    // Poll MIDI messages
+    midiController?.poll();
     const positions: Record<string, number> = {};
     for (const trackId of engine.getAllTrackIds()) {
       const pos = engine.getPosition(trackId);
@@ -62,19 +88,31 @@ export function startPlaybackTicker(webview: any, intervalMs = 16) {
       }
 
       const loop = engine.getActiveLoop(trackId);
+      const filterAutoActive = engine.isAutomationActive(trackId, 0); // DJ_PARAM_FILTER
+      const volumeAutoActive = engine.isAutomationActive(trackId, 1); // DJ_PARAM_VOLUME
+      const eqLoAuto = engine.isAutomationActive(trackId, 2);
+      const eqMidAuto = engine.isAutomationActive(trackId, 3);
+      const eqHiAuto = engine.isAutomationActive(trackId, 4);
+      const eqAutoActive = eqLoAuto || eqMidAuto || eqHiAuto;
       webview.rpc?.send?.playbackTick?.({
         trackId,
         position: pos,
         isPlaying,
         level: isPlaying ? engine.getLevel(trackId) : 0,
         ...(loop ? { loopStart: loop.start, loopEnd: loop.end } : {}),
+        ...(filterAutoActive ? { filterValue: engine.getFilter(trackId), filterAutomationActive: true } : {}),
+        ...(volumeAutoActive ? { volumeAutomationActive: true } : {}),
+        ...(eqAutoActive ? (() => { const eq = engine.getEQ(trackId); return { eqLo: eq.lo, eqMid: eq.mid, eqHi: eq.hi, eqAutomationActive: true }; })() : {}),
       });
     }
     if (Object.keys(positions).length >= 2 && ++logCounter % 60 === 0) {
       const ids = Object.keys(positions);
       const posStrs = ids.map((id) => `${id}=${positions[id]!.toFixed(4)}s`).join(" ");
-      const diff = Math.abs(positions[ids[0]!]! - positions[ids[1]!]!);
-      console.log(`[SYNC] ${posStrs} diff=${(diff * 1000).toFixed(1)}ms`);
+      // Use C-level atomic sync diff measurement (no JS callback gap)
+      const bpm = engine.getOriginalBpm(ids[0]!) || 120;
+      const barDur = 4 * 60 / bpm;
+      const syncDiff = engine.getSyncDiff(ids[0]!, ids[1]!, 0, barDur);
+      console.log(`[SYNC] ${posStrs} diff=${(Math.abs(syncDiff) * 1000).toFixed(1)}ms`);
     }
   }, intervalMs);
 }

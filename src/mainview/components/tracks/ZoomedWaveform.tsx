@@ -2,6 +2,7 @@ import { useRef, useEffect, useCallback } from "react";
 import type { Peaks3Band, CuePoint } from "../../../shared/types.ts";
 import { debugLog, debugLogThrottled } from "../../lib/debugLog.ts";
 import { useCueStore } from "../../stores/cueStore.ts";
+import { usePlayerStore } from "../../stores/playerStore.ts";
 
 interface ZoomedWaveformProps {
   trackId: string;
@@ -31,6 +32,9 @@ export function ZoomedWaveform({
   const loopRegion = useRef<{ start: number; end: number } | null>(null);
   const redrawRef = useRef<() => void>(() => {});
   const draggingCueRef = useRef<string | null>(null);
+  const draggingLoopRef = useRef<"start" | "end" | "body" | null>(null);
+  const loopDragStartMouse = useRef(0);
+  const loopDragStartRegion = useRef<{ start: number; end: number } | null>(null);
 
   const isLocked = lockedPosition != null;
 
@@ -162,20 +166,35 @@ export function ZoomedWaveform({
         }
       }
 
-      // Draw active loop region
-      const loop = loopRegion.current;
-      if (loop) {
-        const lx1 = timeToX(loop.start, timeStart, w);
-        const lx2 = timeToX(loop.end, timeStart, w);
-        const clampL = Math.max(0, Math.min(w, lx1));
-        const clampR = Math.max(0, Math.min(w, lx2));
-        if (clampR > clampL) {
-          ctx.fillStyle = "rgba(249, 115, 22, 0.12)";
+      // Draw loop regions from cue automations (always visible)
+      if (cues) {
+        const playerTracks = usePlayerStore.getState().tracks;
+        const trackState = playerTracks.get(trackId);
+        const bpm = trackState?.track.bpm ?? 120;
+        const beatDur = 60 / bpm;
+        for (const cue of cues) {
+          const loopAuto = cue.automations.find((a) => a.type === "loop");
+          if (!loopAuto) continue;
+          const loopBeats = loopAuto.endValue > 0 ? loopAuto.endValue : 16;
+          const loopStart = cue.time;
+          const loopEnd = cue.time + loopBeats * beatDur;
+          const lx1 = timeToX(loopStart, timeStart, w);
+          const lx2 = timeToX(loopEnd, timeStart, w);
+          const clampL = Math.max(0, Math.min(w, lx1));
+          const clampR = Math.max(0, Math.min(w, lx2));
+          if (clampR <= clampL) continue;
+
+          // Dim preview if not actively looping, bright if C engine loop matches
+          const engineLoop = loopRegion.current;
+          const isActive = engineLoop && Math.abs(engineLoop.start - loopStart) < 0.1 && Math.abs(engineLoop.end - loopEnd) < 0.1;
+          const fillAlpha = isActive ? 0.15 : 0.07;
+          const strokeAlpha = isActive ? 0.8 : 0.35;
+
+          ctx.fillStyle = `rgba(249, 115, 22, ${fillAlpha})`;
           ctx.fillRect(clampL, 0, clampR - clampL, h);
-          // Loop boundaries
-          ctx.strokeStyle = "rgba(249, 115, 22, 0.7)";
-          ctx.lineWidth = 2;
-          ctx.setLineDash([4, 3]);
+          ctx.strokeStyle = `rgba(249, 115, 22, ${strokeAlpha})`;
+          ctx.lineWidth = isActive ? 2 : 1;
+          ctx.setLineDash(isActive ? [4, 3] : [3, 4]);
           if (lx1 >= 0 && lx1 <= w) {
             ctx.beginPath(); ctx.moveTo(lx1, 0); ctx.lineTo(lx1, h); ctx.stroke();
           }
@@ -183,6 +202,11 @@ export function ZoomedWaveform({
             ctx.beginPath(); ctx.moveTo(lx2, 0); ctx.lineTo(lx2, h); ctx.stroke();
           }
           ctx.setLineDash([]);
+          // Bottom bar in cue color
+          ctx.fillStyle = cue.color;
+          ctx.globalAlpha = isActive ? 0.8 : 0.4;
+          ctx.fillRect(clampL, h - 3, clampR - clampL, 3);
+          ctx.globalAlpha = 1;
         }
       }
 
@@ -407,6 +431,48 @@ export function ZoomedWaveform({
         }
       }
 
+      // Check if clicking near loop boundary (from cue automations)
+      if (cues) {
+        const trackState = usePlayerStore.getState().tracks.get(trackId);
+        const bpm = trackState?.track.bpm ?? 120;
+        const beatDur = 60 / bpm;
+        const rect2 = e.currentTarget.getBoundingClientRect();
+        const mouseX2 = e.clientX - rect2.left;
+        const halfW = zoom / 2;
+        const tStart = viewPosition.current - halfW;
+        for (const cue of cues) {
+          const loopAuto = cue.automations.find((a) => a.type === "loop");
+          if (!loopAuto) continue;
+          const loopBeats = loopAuto.endValue > 0 ? loopAuto.endValue : 16;
+          const ls = cue.time;
+          const le = cue.time + loopBeats * beatDur;
+          const loopStartX = ((ls - tStart) / zoom) * rect2.width;
+          const loopEndX = ((le - tStart) / zoom) * rect2.width;
+          const region = { start: ls, end: le };
+          if (Math.abs(mouseX2 - loopStartX) < 8) {
+            draggingLoopRef.current = "start";
+            loopDragStartMouse.current = e.clientX;
+            loopDragStartRegion.current = { ...region };
+            e.currentTarget.style.cursor = "ew-resize";
+            return;
+          }
+          if (Math.abs(mouseX2 - loopEndX) < 8) {
+            draggingLoopRef.current = "end";
+            loopDragStartMouse.current = e.clientX;
+            loopDragStartRegion.current = { ...region };
+            e.currentTarget.style.cursor = "ew-resize";
+            return;
+          }
+          if (mouseX2 > loopStartX + 8 && mouseX2 < loopEndX - 8) {
+            draggingLoopRef.current = "body";
+            loopDragStartMouse.current = e.clientX;
+            loopDragStartRegion.current = { ...region };
+            e.currentTarget.style.cursor = "move";
+            return;
+          }
+        }
+      }
+
       if (!canDrag) return;
       isDragging.current = true;
       debugLog("zoomedWaveform.mouseDown", {
@@ -456,6 +522,111 @@ export function ZoomedWaveform({
         return;
       }
 
+      // Loop boundary dragging
+      if (draggingLoopRef.current && loopDragStartRegion.current) {
+        const mouseX = e.clientX - rect.left;
+        const halfWindow = zoom / 2;
+        const timeStart = viewPosition.current - halfWindow;
+        let time = timeStart + (mouseX / rect.width) * zoom;
+        time = Math.max(0, Math.min(duration, time));
+
+        // Snap to nearest downbeat (bar start)
+        if (beats && beats.length > 0) {
+          const downbeats: number[] = [];
+          for (let i = downbeatOffset; i < beats.length; i += 4) {
+            downbeats.push(beats[i]!);
+          }
+          if (downbeats.length > 0) {
+            let nearest = downbeats[0]!;
+            let minDist = Infinity;
+            for (const bt of downbeats) {
+              const d = Math.abs(bt - time);
+              if (d < minDist) { minDist = d; nearest = bt; }
+            }
+            time = nearest;
+          }
+        }
+
+        const orig = loopDragStartRegion.current;
+        let newStart = orig.start;
+        let newEnd = orig.end;
+
+        if (draggingLoopRef.current === "start") {
+          newStart = Math.min(time, newEnd - 0.1);
+        } else if (draggingLoopRef.current === "end") {
+          newEnd = Math.max(time, newStart + 0.1);
+        } else {
+          // body: move entire loop, snap to downbeats
+          const dx = e.clientX - loopDragStartMouse.current;
+          const secondsPerPx = zoom / rect.width;
+          const shift = -dx * secondsPerPx;
+          const shiftedStart = orig.start + shift;
+          if (beats && beats.length > 0) {
+            const downbeats: number[] = [];
+            for (let i = downbeatOffset; i < beats.length; i += 4) {
+              downbeats.push(beats[i]!);
+            }
+            let nearest = downbeats[0] ?? 0;
+            let minDist = Infinity;
+            for (const bt of downbeats) {
+              const d = Math.abs(bt - shiftedStart);
+              if (d < minDist) { minDist = d; nearest = bt; }
+            }
+            const snapShift = nearest - orig.start;
+            newStart = orig.start + snapShift;
+            newEnd = orig.end + snapShift;
+          } else {
+            newStart = shiftedStart;
+            newEnd = orig.end + shift;
+          }
+        }
+
+        newStart = Math.max(0, newStart);
+        newEnd = Math.min(duration, newEnd);
+        if (newEnd > newStart + 0.05) {
+          loopRegion.current = { start: newStart, end: newEnd };
+
+          // Find the cue that owns this loop and update it through the store
+          const allCues = useCueStore.getState().cues;
+          let ownerCueId: string | null = null;
+          let loopAutoId: string | null = null;
+          for (const [, cue] of allCues) {
+            if (cue.trackId !== trackId) continue;
+            const loopA = cue.automations.find((a) => a.type === "loop");
+            if (!loopA) continue;
+            // Match: cue time is near original loop start
+            if (Math.abs(cue.time - loopDragStartRegion.current!.start) < 0.1 ||
+                Math.abs(cue.time - newStart) < 0.1) {
+              ownerCueId = cue.id;
+              loopAutoId = loopA.id;
+              break;
+            }
+          }
+
+          if (ownerCueId && loopAutoId) {
+            const trackState = usePlayerStore.getState().tracks.get(trackId);
+            const bpm = trackState?.track.bpm ?? 120;
+            const beatDuration = 60 / bpm;
+            // Snap to full bars (4 beats) when dragging
+            const rawBeats = (newEnd - newStart) / beatDuration;
+            const newLoopBeats = Math.max(4, Math.round(rawBeats / 4) * 4);
+
+            if (draggingLoopRef.current === "body" || draggingLoopRef.current === "start") {
+              // Moving start or body — update cue time
+              useCueStore.getState().updateCue(ownerCueId, { time: newStart });
+            }
+            // Update loop length in beats
+            useCueStore.getState().updateAutomation(ownerCueId, loopAutoId, { endValue: Math.max(1, newLoopBeats) });
+          } else {
+            // No owning cue found — just update C engine directly
+            window.djRpc?.request?.setLoop?.({ trackId, startSec: newStart, endSec: newEnd });
+          }
+
+          redrawRef.current();
+        }
+        return;
+      }
+
       if (isDragging.current && canDrag) {
         const dx = e.clientX - dragStartX.current;
         const secondsPerPx = zoom / rect.width;
@@ -498,22 +669,44 @@ export function ZoomedWaveform({
       const hoverTime = timeStart + (relX / rect.width) * zoom;
       onHoverTimeChange?.(Math.max(0, Math.min(duration, hoverTime)));
 
-      // Cue proximity cursor
-      if (!isDragging.current && cues && cues.length > 0) {
-        let nearCue = false;
-        for (const cue of cues) {
-          if (cue.time < timeStart || cue.time > timeStart + zoom) continue;
-          const cueX = ((cue.time - timeStart) / zoom) * rect.width;
-          if (Math.abs(relX - cueX) < 8) {
-            nearCue = true;
-            break;
+      // Proximity cursor (cues + loop boundaries)
+      if (!isDragging.current && !draggingLoopRef.current) {
+        let specialCursor: string | null = null;
+
+        // Loop boundary proximity (from cue automations)
+        if (cues) {
+          const ts = usePlayerStore.getState().tracks.get(trackId);
+          const bpmH = ts?.track.bpm ?? 120;
+          const bdH = 60 / bpmH;
+          for (const cue of cues) {
+            const la = cue.automations.find((a) => a.type === "loop");
+            if (!la) continue;
+            const lb = la.endValue > 0 ? la.endValue : 16;
+            const lsx = ((cue.time - timeStart) / zoom) * rect.width;
+            const lex = (((cue.time + lb * bdH) - timeStart) / zoom) * rect.width;
+            if (Math.abs(relX - lsx) < 8 || Math.abs(relX - lex) < 8) {
+              specialCursor = "ew-resize";
+              break;
+            } else if (relX > lsx + 8 && relX < lex - 8) {
+              specialCursor = "move";
+              break;
+            }
           }
         }
-        if (nearCue) {
-          e.currentTarget.style.cursor = "ew-resize";
-        } else {
-          e.currentTarget.style.cursor = canDrag ? "grab" : "default";
+
+        // Cue proximity
+        if (!specialCursor && cues && cues.length > 0) {
+          for (const cue of cues) {
+            if (cue.time < timeStart || cue.time > timeStart + zoom) continue;
+            const cueX = ((cue.time - timeStart) / zoom) * rect.width;
+            if (Math.abs(relX - cueX) < 8) {
+              specialCursor = "ew-resize";
+              break;
+            }
+          }
         }
+
+        e.currentTarget.style.cursor = specialCursor ?? (canDrag ? "grab" : "default");
       }
     },
     [zoom, beats, duration, trackId, draw, canDrag, isLocked, cues, onLockedPositionChange, onHoverTimeChange]
@@ -526,6 +719,12 @@ export function ZoomedWaveform({
         e.currentTarget.style.cursor = canDrag ? "grab" : "default";
         return;
       }
+      if (draggingLoopRef.current) {
+        draggingLoopRef.current = null;
+        loopDragStartRegion.current = null;
+        e.currentTarget.style.cursor = canDrag ? "grab" : "default";
+        return;
+      }
       isDragging.current = false;
       e.currentTarget.style.cursor = canDrag ? "grab" : "default";
     },
@@ -534,6 +733,8 @@ export function ZoomedWaveform({
 
   const handleMouseLeave = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     draggingCueRef.current = null;
+    draggingLoopRef.current = null;
+    loopDragStartRegion.current = null;
     isDragging.current = false;
     e.currentTarget.style.cursor = canDrag ? "grab" : "default";
     onHoverTimeChange?.(null);

@@ -95,17 +95,40 @@ export function initDB(): Database {
     );
   `);
 
-  // Connections between cue points
+  // Automations on cue points
   db.exec(`
-    CREATE TABLE IF NOT EXISTS cue_connections (
+    CREATE TABLE IF NOT EXISTS cue_automations (
       id TEXT PRIMARY KEY,
-      sourceCueId TEXT NOT NULL REFERENCES cue_points(id) ON DELETE CASCADE,
-      targetCueId TEXT NOT NULL REFERENCES cue_points(id) ON DELETE CASCADE,
-      targetFilePath TEXT NOT NULL,
-      action TEXT NOT NULL DEFAULT 'start',
-      UNIQUE(sourceCueId, targetCueId)
+      cueId TEXT NOT NULL REFERENCES cue_points(id) ON DELETE CASCADE,
+      type TEXT NOT NULL DEFAULT 'connect',
+      durationBars INTEGER NOT NULL DEFAULT 0,
+      interpolation TEXT NOT NULL DEFAULT 'linear',
+      startValue REAL NOT NULL DEFAULT 0,
+      endValue REAL NOT NULL DEFAULT 1,
+      targetCueId TEXT,
+      targetFilePath TEXT
     );
   `);
+
+  // Migrate old cue_connections table if it exists
+  try {
+    const oldConns = db.prepare("SELECT * FROM cue_connections").all() as {
+      id: string; sourceCueId: string; targetCueId: string; targetFilePath: string; action: string;
+    }[];
+    if (oldConns.length > 0) {
+      const stmt = db.prepare(`
+        INSERT OR IGNORE INTO cue_automations (id, cueId, type, durationBars, interpolation, startValue, endValue, targetCueId, targetFilePath)
+        VALUES ($id, $cueId, 'connect', 0, 'linear', 0, 1, $targetCueId, $targetFilePath)
+      `);
+      for (const c of oldConns) {
+        stmt.run({ $id: c.id, $cueId: c.sourceCueId, $targetCueId: c.targetCueId, $targetFilePath: c.targetFilePath });
+      }
+      db.exec("DROP TABLE cue_connections");
+      console.log(`[DB] Migrated ${oldConns.length} cue_connections → cue_automations`);
+    }
+  } catch {
+    // Table doesn't exist, nothing to migrate
+  }
 
   console.log("[DB] Library database initialized at", DB_PATH);
   return db;
@@ -211,7 +234,7 @@ export function removeTrack(filePath: string): void {
 
 // --- Collection CRUD ---
 
-import type { CuePoint, CueConnection, CollectionTrack, Peaks3Band } from "../../shared/types.ts";
+import type { CuePoint, CueAutomation, CollectionTrack, Peaks3Band, AutomationType, AutomationInterpolation } from "../../shared/types.ts";
 
 export function upsertCollectionTrack(track: {
   filePath: string; title: string; artist: string; album: string; genre: string;
@@ -288,64 +311,85 @@ export function getCuesForTrack(filePath: string): CuePoint[] {
   }[];
 
   return rows.map((row) => {
-    const connections = db.prepare(
-      "SELECT * FROM cue_connections WHERE sourceCueId = ?"
+    const autos = db.prepare(
+      "SELECT * FROM cue_automations WHERE cueId = ?"
     ).all(row.id) as {
-      id: string; sourceCueId: string; targetCueId: string; targetFilePath: string; action: string;
+      id: string; cueId: string; type: string; durationBars: number; interpolation: string;
+      startValue: number; endValue: number; targetCueId: string | null; targetFilePath: string | null;
     }[];
 
     return {
       id: row.id,
       filePath: row.filePath,
-      trackId: "",  // runtime-only, set when track is loaded
+      trackId: "",
       label: row.label,
       time: row.time,
       color: row.color,
       active: row.active === 1,
-      connections: connections.map((c) => ({
-        id: c.id,
-        cueId: c.targetCueId,
-        targetFilePath: c.targetFilePath,
-        action: c.action as CueConnection["action"],
+      automations: autos.map((a) => ({
+        id: a.id,
+        type: a.type as AutomationType,
+        durationBars: a.durationBars,
+        interpolation: a.interpolation as AutomationInterpolation,
+        startValue: a.startValue,
+        endValue: a.endValue,
+        ...(a.targetCueId ? { targetCueId: a.targetCueId } : {}),
+        ...(a.targetFilePath ? { targetFilePath: a.targetFilePath } : {}),
       })),
     };
   });
 }
 
 export function upsertCue(cue: { id: string; filePath: string; label: string; time: number; color: string; active: boolean }): void {
-  db.prepare(`
-    INSERT INTO cue_points (id, filePath, label, time, color, active)
-    VALUES ($id, $filePath, $label, $time, $color, $active)
-    ON CONFLICT(id) DO UPDATE SET label=$label, time=$time, color=$color, active=$active
-  `).run({
-    $id: cue.id,
-    $filePath: cue.filePath,
-    $label: cue.label,
-    $time: cue.time,
-    $color: cue.color,
-    $active: cue.active ? 1 : 0,
-  });
+  try {
+    db.prepare(`
+      INSERT INTO cue_points (id, filePath, label, time, color, active)
+      VALUES ($id, $filePath, $label, $time, $color, $active)
+      ON CONFLICT(id) DO UPDATE SET label=$label, time=$time, color=$color, active=$active
+    `).run({
+      $id: cue.id,
+      $filePath: cue.filePath,
+      $label: cue.label,
+      $time: cue.time,
+      $color: cue.color,
+      $active: cue.active ? 1 : 0,
+    });
+  } catch {
+    // UNIQUE(filePath, time) conflict — same file loaded on multiple decks
+  }
 }
 
 export function deleteCue(id: string): void {
-  db.prepare("DELETE FROM cue_connections WHERE sourceCueId = ? OR targetCueId = ?").run(id, id);
+  db.prepare("DELETE FROM cue_automations WHERE cueId = ? OR targetCueId = ?").run(id, id);
   db.prepare("DELETE FROM cue_points WHERE id = ?").run(id);
 }
 
-export function upsertConnection(conn: { id: string; sourceCueId: string; targetCueId: string; targetFilePath: string; action: string }): void {
-  db.prepare(`
-    INSERT INTO cue_connections (id, sourceCueId, targetCueId, targetFilePath, action)
-    VALUES ($id, $sourceCueId, $targetCueId, $targetFilePath, $action)
-    ON CONFLICT(id) DO UPDATE SET action=$action
-  `).run({
-    $id: conn.id,
-    $sourceCueId: conn.sourceCueId,
-    $targetCueId: conn.targetCueId,
-    $targetFilePath: conn.targetFilePath,
-    $action: conn.action,
-  });
+export function upsertAutomation(auto: {
+  id: string; cueId: string; type: string; durationBars: number; interpolation: string;
+  startValue: number; endValue: number; targetCueId?: string; targetFilePath?: string;
+}): void {
+  try {
+    db.prepare(`
+      INSERT INTO cue_automations (id, cueId, type, durationBars, interpolation, startValue, endValue, targetCueId, targetFilePath)
+      VALUES ($id, $cueId, $type, $durationBars, $interpolation, $startValue, $endValue, $targetCueId, $targetFilePath)
+      ON CONFLICT(id) DO UPDATE SET type=$type, durationBars=$durationBars, interpolation=$interpolation,
+        startValue=$startValue, endValue=$endValue, targetCueId=$targetCueId, targetFilePath=$targetFilePath
+    `).run({
+      $id: auto.id,
+      $cueId: auto.cueId,
+      $type: auto.type,
+      $durationBars: auto.durationBars,
+      $interpolation: auto.interpolation,
+      $startValue: auto.startValue,
+      $endValue: auto.endValue,
+      $targetCueId: auto.targetCueId ?? null,
+      $targetFilePath: auto.targetFilePath ?? null,
+    });
+  } catch {
+    // FK constraint — cueId is a runtime-only copy (same file on multiple decks)
+  }
 }
 
-export function deleteConnection(id: string): void {
-  db.prepare("DELETE FROM cue_connections WHERE id = ?").run(id);
+export function deleteAutomation(id: string): void {
+  db.prepare("DELETE FROM cue_automations WHERE id = ?").run(id);
 }

@@ -5,7 +5,7 @@ import { AudioEngine } from "./audio/engine.ts";
 import {
   initDB, searchTracks, getTrackCount,
   getCuesForTrack, upsertCue, deleteCue as dbDeleteCue,
-  upsertConnection, deleteConnection as dbDeleteConnection,
+  upsertAutomation, deleteAutomation as dbDeleteAutomation,
   upsertCollectionTrack, getCollectionTrack, getAllCollectionTracks,
 } from "./library/db.ts";
 import { scanDirectory as scanDir } from "./library/scanner.ts";
@@ -193,6 +193,35 @@ export function createRpcRequestHandlers(audioEngine: AudioEngine, hooks: Reques
       };
     },
 
+    getSyncDiff: ({ trackId1, trackId2, beatRef, barDuration }: {
+      trackId1: string; trackId2: string; beatRef: number; barDuration: number;
+    }) => {
+      return audioEngine.getSyncDiff(trackId1, trackId2, beatRef, barDuration);
+    },
+
+    getPlaybackStates: ({ trackIds }: { trackIds: string[] }) => {
+      const result: Record<string, { position: number; isPlaying: boolean }> = {};
+      for (const id of trackIds) {
+        result[id] = {
+          position: audioEngine.getPosition(id),
+          isPlaying: audioEngine.isPlaying(id),
+        };
+      }
+      return result;
+    },
+
+    getTempoInfo: ({ trackIds }: { trackIds: string[] }) => {
+      const result: Record<string, { originalBpm: number; tempoRatio: number; masterBpm: number }> = {};
+      for (const id of trackIds) {
+        result[id] = {
+          originalBpm: audioEngine.getOriginalBpm(id),
+          tempoRatio: audioEngine.getTempoRatio(id),
+          masterBpm: audioEngine.masterBpm,
+        };
+      }
+      return result;
+    },
+
     openFileDialog: async () => {
       console.log("[RPC] openFileDialog called — calling Utils...");
       try {
@@ -267,14 +296,33 @@ export function createRpcRequestHandlers(audioEngine: AudioEngine, hooks: Reques
       dbDeleteCue(cueId);
     },
 
-    saveCueConnection: ({ id, sourceCueId, targetCueId, targetFilePath, action }: {
-      id: string; sourceCueId: string; targetCueId: string; targetFilePath: string; action: string;
+    saveCueAutomation: ({ id, cueId, type, durationBars, interpolation, startValue, endValue, targetCueId, targetFilePath }: {
+      id: string; cueId: string; type: string; durationBars: number; interpolation: string;
+      startValue: number; endValue: number; targetCueId?: string; targetFilePath?: string;
     }) => {
-      upsertConnection({ id, sourceCueId, targetCueId, targetFilePath, action });
+      upsertAutomation({ id, cueId, type, durationBars, interpolation, startValue, endValue, targetCueId, targetFilePath });
     },
 
-    deleteCueConnection: ({ connectionId }: { connectionId: string }) => {
-      dbDeleteConnection(connectionId);
+    deleteCueAutomation: ({ automationId }: { automationId: string }) => {
+      dbDeleteAutomation(automationId);
+    },
+
+    setAutomation: ({ trackId, param, startVal, endVal, durationSeconds, interp }: {
+      trackId: string; param: number; startVal: number; endVal: number; durationSeconds: number; interp: number;
+    }) => {
+      audioEngine.setAutomation(trackId, param, startVal, endVal, durationSeconds, interp);
+    },
+
+    cancelAutomation: ({ trackId, param }: { trackId: string; param: number }) => {
+      audioEngine.cancelAutomation(trackId, param);
+    },
+
+    isAutomationActive: ({ trackId, param }: { trackId: string; param: number }) => {
+      return audioEngine.isAutomationActive(trackId, param);
+    },
+
+    getAutomationValue: ({ trackId, param }: { trackId: string; param: number }) => {
+      return audioEngine.getAutomationValue(trackId, param);
     },
 
     saveCollectionTrack: ({ filePath, title, artist, album, genre, duration, bpm, key, peaks, beats }: {

@@ -17,6 +17,7 @@ interface TrackRowProps {
     track: {
       filePath: string;
       metadata: { title: string; artist: string; bpm: number };
+      bpm: number;
       duration: number;
       peaks: Peaks3Band;
       beats: number[];
@@ -106,12 +107,14 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
   }, [cuesMap, trackId]);
   const timeRef = useRef<HTMLSpanElement>(null);
   const [editingBpm, setEditingBpm] = useState(false);
+  const trackBpm = state.track.metadata.bpm > 0 ? state.track.metadata.bpm : state.track.bpm;
   const [bpmValue, setBpmValue] = useState(
-    state.track.metadata.bpm > 0 ? state.track.metadata.bpm.toFixed(1) : ""
+    trackBpm > 0 ? trackBpm.toFixed(1) : ""
   );
   const [customBeats, setCustomBeats] = useState<number[] | null>(null);
   const [downbeatOffset, setDownbeatOffset] = useState(0); // 0-3: which beat index is "1"
   const [zoomHoverTime, setZoomHoverTime] = useState<number | null>(null);
+  const [zoomBeats, setZoomBeats] = useState(16); // beats visible in viewport
 
   const positionRef = useRef(state.position);
 
@@ -244,8 +247,14 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
   const displayBeats = customBeats ?? state.track.beats;
   const displayBpm = customBeats
     ? parseFloat(bpmValue)
-    : state.track.metadata.bpm;
+    : (state.track.metadata.bpm > 0 ? state.track.metadata.bpm : state.track.bpm);
   const currentPosition = positionRef.current;
+
+  // Zoom defined in beats → converted to seconds per track BPM.
+  // Both tracks always show the same number of beats, so grids align.
+  const effectiveZoom = displayBpm > 0
+    ? zoomBeats * (60 / displayBpm)
+    : 10; // fallback when BPM unknown
 
   // Handle MIDI actions for this track
   useEffect(() => {
@@ -315,7 +324,7 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
       {/* Top row: mixer square + zoomed waveform */}
       <div className="flex px-4 pt-2 gap-2">
         {/* Mixer square: EQ knobs + volume fader */}
-        <div className="shrink-0 flex gap-1.5 bg-zinc-800/50 rounded-md px-1.5 py-1 h-28 items-center">
+        <div className="shrink-0 flex gap-1.5 bg-zinc-800/50 rounded-md px-1.5 py-1 h-36 items-center">
           <EQControls trackId={trackId} layout="vertical" />
           {/* Volume fader — custom slim track */}
           <VolumeFader
@@ -340,7 +349,7 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
             duration={state.track.duration}
             beats={displayBeats}
             downbeatOffset={downbeatOffset}
-            zoom={10}
+            zoom={effectiveZoom}
             isPlaying={state.isPlaying}
             position={currentPosition}
             lockedPosition={state.lockedPosition}
@@ -352,6 +361,19 @@ export function TrackRow({ trackId, state, onWaveformRef }: TrackRowProps) {
             onHoverTimeChange={setZoomHoverTime}
             cues={trackCues}
           />
+          {/* Zoom controls */}
+          <div className="absolute bottom-1 right-1 z-20 flex gap-0.5">
+            <button
+              className="w-5 h-5 flex items-center justify-center rounded bg-black/60 text-zinc-400 hover:text-zinc-200 text-[11px] font-bold"
+              onClick={() => setZoomBeats((b) => Math.max(4, b / 2))}
+              title="Zoom in (fewer beats)"
+            >+</button>
+            <button
+              className="w-5 h-5 flex items-center justify-center rounded bg-black/60 text-zinc-400 hover:text-zinc-200 text-[11px] font-bold"
+              onClick={() => setZoomBeats((b) => Math.min(128, b * 2))}
+              title="Zoom out (more beats)"
+            >-</button>
+          </div>
         </div>
       </div>
 

@@ -5,15 +5,17 @@ const mockRpc = {
   request: {
     saveCue: mock(() => Promise.resolve()),
     deleteCue: mock(() => Promise.resolve()),
-    saveCueConnection: mock(() => Promise.resolve()),
-    deleteCueConnection: mock(() => Promise.resolve()),
+    saveCueAutomation: mock(() => Promise.resolve()),
+    deleteCueAutomation: mock(() => Promise.resolve()),
+    setAutomation: mock(() => Promise.resolve()),
+    cancelAutomation: mock(() => Promise.resolve()),
     saveCollectionTrack: mock(() => Promise.resolve()),
     getCuesForTrack: mock(() => Promise.resolve([])),
     loadTrack: mock(() => Promise.resolve(null)),
   },
 };
 
-// @ts-expect-error — minimal mock
+// @ts-ignore — minimal mock
 globalThis.window = globalThis.window ?? {};
 // @ts-expect-error — mock djRpc
 globalThis.window.djRpc = mockRpc;
@@ -43,7 +45,7 @@ function addMockTrack(trackId: string, filePath: string) {
 
 beforeEach(() => {
   // Reset stores
-  useCueStore.setState({ cues: new Map(), pendingConnection: null, hoveredCueId: null });
+  useCueStore.setState({ cues: new Map(), pendingConnection: null, hoveredCueId: null, selectedCueId: null });
   // Reset player store tracks
   usePlayerStore.setState({ tracks: new Map(), selectedTrackId: null });
 });
@@ -149,10 +151,11 @@ test("loadCuesForTrack creates runtime copies for duplicate filePaths", async ()
       time: 30,
       color: "#22c55e",
       active: false,
-      connections: [],
+      automations: [],
     },
   ];
 
+  // @ts-ignore — test mock override
   mockRpc.request.getCuesForTrack = mock(() => Promise.resolve(mockCues));
 
   // Load for track_1

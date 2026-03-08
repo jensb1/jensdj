@@ -44,6 +44,10 @@ const lib = dlopen(libPath, {
     args: [FFIType.ptr, FFIType.f32, FFIType.f32, FFIType.f32],
     returns: FFIType.void,
   },
+  dj_get_eq_lo: { args: [FFIType.ptr], returns: FFIType.f32 },
+  dj_get_eq_mid: { args: [FFIType.ptr], returns: FFIType.f32 },
+  dj_get_eq_hi: { args: [FFIType.ptr], returns: FFIType.f32,
+  },
   dj_get_level: { args: [FFIType.ptr], returns: FFIType.f32 },
   dj_set_tempo: {
     args: [FFIType.ptr, FFIType.f32],
@@ -73,6 +77,10 @@ const lib = dlopen(libPath, {
     args: [FFIType.ptr],
     returns: FFIType.i32,
   },
+  dj_get_sync_diff: {
+    args: [FFIType.ptr, FFIType.ptr, FFIType.f32, FFIType.f32],
+    returns: FFIType.f32,
+  },
   dj_set_loop: {
     args: [FFIType.ptr, FFIType.f32, FFIType.f32],
     returns: FFIType.void,
@@ -83,6 +91,30 @@ const lib = dlopen(libPath, {
   },
   dj_is_looping: {
     args: [FFIType.ptr],
+    returns: FFIType.i32,
+  },
+  dj_set_filter: {
+    args: [FFIType.ptr, FFIType.f32],
+    returns: FFIType.void,
+  },
+  dj_get_filter: {
+    args: [FFIType.ptr],
+    returns: FFIType.f32,
+  },
+  dj_set_automation: {
+    args: [FFIType.ptr, FFIType.i32, FFIType.f32, FFIType.f32, FFIType.f32, FFIType.i32],
+    returns: FFIType.void,
+  },
+  dj_cancel_automation: {
+    args: [FFIType.ptr, FFIType.i32],
+    returns: FFIType.void,
+  },
+  dj_get_automation_value: {
+    args: [FFIType.ptr, FFIType.i32],
+    returns: FFIType.f32,
+  },
+  dj_is_automation_active: {
+    args: [FFIType.ptr, FFIType.i32],
     returns: FFIType.i32,
   },
   dj_get_peaks: {
@@ -192,6 +224,13 @@ export const djSetEQ = (
   s.dj_set_eq(sound as unknown as Pointer, lo, mid, hi);
 };
 
+export const djGetEqLo = (sound: NativePtr): number =>
+  s.dj_get_eq_lo(sound as unknown as Pointer);
+export const djGetEqMid = (sound: NativePtr): number =>
+  s.dj_get_eq_mid(sound as unknown as Pointer);
+export const djGetEqHi = (sound: NativePtr): number =>
+  s.dj_get_eq_hi(sound as unknown as Pointer);
+
 export const djGetLevel = (sound: NativePtr): number =>
   s.dj_get_level(sound as unknown as Pointer);
 
@@ -242,6 +281,9 @@ export const djSyncStart = (
 export const djCancelScheduledStart = (sound: NativePtr): number =>
   s.dj_cancel_scheduled_start(sound as unknown as Pointer);
 
+export const djGetSyncDiff = (sound1: NativePtr, sound2: NativePtr, beatRef: number, barDuration: number): number =>
+  s.dj_get_sync_diff(sound1 as unknown as Pointer, sound2 as unknown as Pointer, beatRef, barDuration);
+
 export const djSetLoop = (sound: NativePtr, startSec: number, endSec: number): void => {
   s.dj_set_loop(sound as unknown as Pointer, startSec, endSec);
 };
@@ -252,6 +294,40 @@ export const djClearLoop = (sound: NativePtr): void => {
 
 export const djIsLooping = (sound: NativePtr): boolean =>
   s.dj_is_looping(sound as unknown as Pointer) === 1;
+
+export const djSetFilter = (sound: NativePtr, value: number): void => {
+  s.dj_set_filter(sound as unknown as Pointer, value);
+};
+
+export const djGetFilter = (sound: NativePtr): number =>
+  s.dj_get_filter(sound as unknown as Pointer);
+
+// Automation constants
+export const DJ_PARAM_FILTER = 0;
+export const DJ_PARAM_VOLUME = 1;
+export const DJ_PARAM_EQ_LO = 2;
+export const DJ_PARAM_EQ_MID = 3;
+export const DJ_PARAM_EQ_HI = 4;
+export const DJ_INTERP_LINEAR = 0;
+export const DJ_INTERP_EASE_IN = 1;
+export const DJ_INTERP_EASE_OUT = 2;
+
+export const djSetAutomation = (
+  sound: NativePtr, param: number, startVal: number, endVal: number,
+  durationSeconds: number, interp: number
+): void => {
+  s.dj_set_automation(sound as unknown as Pointer, param, startVal, endVal, durationSeconds, interp);
+};
+
+export const djCancelAutomation = (sound: NativePtr, param: number): void => {
+  s.dj_cancel_automation(sound as unknown as Pointer, param);
+};
+
+export const djGetAutomationValue = (sound: NativePtr, param: number): number =>
+  s.dj_get_automation_value(sound as unknown as Pointer, param);
+
+export const djIsAutomationActive = (sound: NativePtr, param: number): boolean =>
+  s.dj_is_automation_active(sound as unknown as Pointer, param) === 1;
 
 export const djGetPeaks = (
   filepath: string,

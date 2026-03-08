@@ -15,7 +15,7 @@ const rpc = Electroview.defineRPC<MainViewRPC>({
   handlers: {
     requests: {},
     messages: {
-      playbackTick: ({ trackId, position, isPlaying, level, loopStart, loopEnd }) => {
+      playbackTick: ({ trackId, position, isPlaying, level, loopStart, loopEnd, filterValue, filterAutomationActive, volumeAutomationActive, eqLo, eqMid, eqHi, eqAutomationActive }) => {
         const trackState = usePlayerStore.getState().tracks.get(trackId);
         if (trackState && trackState.isPlaying !== isPlaying) {
           logInfo("playback.stateSync", {
@@ -25,6 +25,36 @@ const rpc = Electroview.defineRPC<MainViewRPC>({
             position: Number(position.toFixed(3)),
           });
           usePlayerStore.getState().setPlaying(trackId, isPlaying);
+        }
+        // Update automation state in store for UI reflection
+        const hasAutoUpdate = filterAutomationActive !== undefined || volumeAutomationActive !== undefined
+          || filterValue !== undefined || eqAutomationActive !== undefined;
+        if (hasAutoUpdate) {
+          usePlayerStore.setState((state) => {
+            const ts = state.tracks.get(trackId);
+            if (!ts) return state;
+            const tracks = new Map(state.tracks);
+            tracks.set(trackId, {
+              ...ts,
+              ...(filterValue !== undefined ? { filterValue } : {}),
+              ...(filterAutomationActive !== undefined ? { filterAutomationActive } : {}),
+              ...(volumeAutomationActive !== undefined ? { volumeAutomationActive } : {}),
+              ...(eqLo !== undefined ? { eqLo } : {}),
+              ...(eqMid !== undefined ? { eqMid } : {}),
+              ...(eqHi !== undefined ? { eqHi } : {}),
+              ...(eqAutomationActive !== undefined ? { eqAutomationActive } : {}),
+            });
+            return { tracks };
+          });
+        } else if (trackState?.filterAutomationActive || trackState?.volumeAutomationActive || trackState?.eqAutomationActive) {
+          // Automation just finished — clear flags
+          usePlayerStore.setState((state) => {
+            const ts = state.tracks.get(trackId);
+            if (!ts) return state;
+            const tracks = new Map(state.tracks);
+            tracks.set(trackId, { ...ts, filterAutomationActive: false, volumeAutomationActive: false, eqAutomationActive: false });
+            return { tracks };
+          });
         }
         debugLogThrottled(`playbackTick:${trackId}`, 1000, "index.playbackTick", {
           trackId,
@@ -116,9 +146,12 @@ declare global {
       getCueDetail: (cueId: string) => {
         id: string; time: number; active: boolean; label: string;
         trackId: string; filePath: string;
-        connections: { id: string; cueId: string; targetFilePath: string; action: string }[];
+        automations: { id: string; type: string; durationBars: number; targetCueId?: string; targetFilePath?: string }[];
       } | null;
       removeAllCuesForTrack: (trackId: string) => number;
+      addCueAutomation: (cueId: string, type: string, durationBars: number, startValue: number, endValue: number, interpolation?: string) => string | null;
+      getAutomationState: (trackId: string, param: number) => Promise<{ active: boolean; value: number }>;
+      getSyncDiff: (trackId1: string, trackId2: string, beatRef: number, barDuration: number) => Promise<number>;
     };
   }
 }
@@ -150,10 +183,13 @@ window.__jensdjAutomation = {
       lockedPosition: number | null;
     }> = {};
 
+    // Batch read all positions in a single RPC call (back-to-back FFI, effectively atomic)
+    const states = await window.djRpc?.request?.getPlaybackStates?.({ trackIds: ids }) ?? {};
+
     for (const trackId of ids) {
       const storeTrack = tracks.get(trackId);
       if (!storeTrack) continue;
-      const playbackState = await window.djRpc?.request?.getPlaybackState?.({ trackId });
+      const playbackState = states[trackId];
       snapshot[trackId] = {
         storePosition: storeTrack.position,
         storeIsPlaying: storeTrack.isPlaying,
@@ -177,10 +213,12 @@ window.__jensdjAutomation = {
       beats: number[];
     }> = {};
 
+    const states = await window.djRpc?.request?.getPlaybackStates?.({ trackIds: ids }) ?? {};
+
     for (const trackId of ids) {
       const storeTrack = tracks.get(trackId);
       if (!storeTrack) continue;
-      const playbackState = await window.djRpc?.request?.getPlaybackState?.({ trackId });
+      const playbackState = states[trackId];
       snapshot[trackId] = {
         backendPosition: playbackState?.position ?? 0,
         backendIsPlaying: playbackState?.isPlaying ?? false,
@@ -245,7 +283,7 @@ window.__jensdjAutomation = {
     useCueStore.getState().completeConnection(targetCueId);
     // Verify it was created
     const source = useCueStore.getState().cues.get(sourceCueId);
-    return source?.connections.some(c => c.cueId === targetCueId) ?? false;
+    return source?.automations.some(a => a.type === "connect" && a.targetCueId === targetCueId) ?? false;
   },
   getCueDetail(cueId: string) {
     const cue = useCueStore.getState().cues.get(cueId);
@@ -253,10 +291,34 @@ window.__jensdjAutomation = {
     return {
       id: cue.id, time: cue.time, active: cue.active, label: cue.label,
       trackId: cue.trackId, filePath: cue.filePath,
-      connections: cue.connections.map(c => ({
-        id: c.id, cueId: c.cueId, targetFilePath: c.targetFilePath, action: c.action,
+      automations: cue.automations.map(a => ({
+        id: a.id, type: a.type, durationBars: a.durationBars,
+        targetCueId: a.targetCueId, targetFilePath: a.targetFilePath,
       })),
     };
+  },
+  addCueAutomation(cueId: string, type: string, durationBars: number, startValue: number, endValue: number, interpolation = "linear") {
+    const cue = useCueStore.getState().cues.get(cueId);
+    if (!cue) return null;
+    const id = crypto.randomUUID();
+    useCueStore.getState().addAutomation(cueId, {
+      id,
+      type: type as import("../shared/types.ts").AutomationType,
+      durationBars,
+      interpolation: interpolation as import("../shared/types.ts").AutomationInterpolation,
+      startValue,
+      endValue,
+    });
+    return id;
+  },
+  async getAutomationState(trackId: string, param: number) {
+    const active = await window.djRpc?.request?.isAutomationActive?.({ trackId, param });
+    const value = await window.djRpc?.request?.getAutomationValue?.({ trackId, param });
+    return { active: !!active, value: value ?? -1 };
+  },
+  async getSyncDiff(trackId1: string, trackId2: string, beatRef: number, barDuration: number) {
+    const diff = await window.djRpc?.request?.getSyncDiff?.({ trackId1, trackId2, beatRef, barDuration });
+    return diff ?? 0;
   },
   removeAllCuesForTrack(trackId: string) {
     const cues = useCueStore.getState().cues;

@@ -11,9 +11,14 @@
 
 #include <aubio/aubio.h>
 #include <rubberband/rubberband-c.h>
+#include "midi.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdatomic.h>
+
+#include <CoreMIDI/CoreMIDI.h>
+#include <CoreFoundation/CoreFoundation.h>
 
 // --- Internal types ---
 
@@ -52,7 +57,7 @@ typedef struct {
 } DJEngine;
 
 // Custom data source that wraps decoded PCM + Rubber Band stretcher
-typedef struct {
+typedef struct DJStretchedSource_tag {
     ma_data_source_base base;
     float* pcm_data;          // Full decoded PCM, interleaved
     ma_uint64 total_frames;
@@ -81,11 +86,54 @@ typedef struct {
     ma_uint64 rms_count;
     float current_rms;
 
-    // Loop points
+    // Loop points (input frames)
     ma_uint64 loop_start_frame;
     ma_uint64 loop_end_frame;
     int loop_active;
+    // Output-frame-based loop tracking for sample-accurate wrapping
+    ma_uint64 loop_output_start;    // output_frame_count when loop region was entered
+    ma_uint64 loop_output_duration; // exact output frames per loop iteration
+    int loop_output_tracking;       // 1 = we've set up output tracking
+
+    // DJ filter (single-knob LP/HP sweep)
+    LPFilter djf_lp[MAX_CHANNELS][2];  // cascaded LP for DJ filter
+    HPFilter djf_hp[MAX_CHANNELS][2];  // cascaded HP for DJ filter
+    float* djf_value;    // pointer to DJSound.filter_value
+    int djf_initialized; // whether filter coefficients are current
+    float djf_last_value; // last filter value used for coefficient computation
+
+    void* owner;  // back-pointer to DJSound (set after creation)
+    ma_uint64 output_frame_count;  // monotonic output frame counter for automation timing
+
+    // Phase tracking: output_frame_count at which bar-phase was 0
+    ma_uint64 phase_origin;       // set at sync start
+    ma_uint64 phase_bar_frames;   // bar duration in output frames (0 = not tracking)
+    struct DJStretchedSource_tag* phase_partner;  // other track to compute diff with
+    _Atomic float phase_diff;     // updated in audio callback after both tracks processed
+    ma_uint64 phase_partner_prev_count; // last read partner output_frame_count; used to detect ordering
 } DJStretchedSource;
+
+// Parameter automation slot
+#define DJ_PARAM_FILTER 0
+#define DJ_PARAM_VOLUME 1
+#define DJ_PARAM_EQ_LO  2
+#define DJ_PARAM_EQ_MID 3
+#define DJ_PARAM_EQ_HI  4
+#define DJ_PARAM_COUNT  5
+
+#define DJ_INTERP_LINEAR  0
+#define DJ_INTERP_EASE_IN 1
+#define DJ_INTERP_EASE_OUT 2
+
+typedef struct {
+    int active;
+    float start_value;
+    float end_value;
+    ma_uint64 start_frame;
+    ma_uint64 duration_frames;
+    int interp;           // DJ_INTERP_*
+    float current_value;  // last computed value (for JS readback)
+} DJAutomation;
 
 typedef struct {
     ma_sound sound;
@@ -97,7 +145,9 @@ typedef struct {
     float eq_hi;
     float current_level;
     float original_bpm;
+    float filter_value;  // 0.0 = full LP, 0.5 = bypass, 1.0 = full HP
     int scheduled; // 1 = sync_start pending, waiting for engine clock
+    DJAutomation automations[DJ_PARAM_COUNT];
 } DJSound;
 
 // --- Globals ---
@@ -121,7 +171,99 @@ static ma_result stretched_read(ma_data_source* pDataSource, void* pFramesOut, m
             // Retrieve into deinterleaved buffers
             unsigned int retrieved = rubberband_retrieve(src->rb, src->deinterleaved_out, to_retrieve);
 
-            // Interleave into output + apply 3-band EQ + accumulate RMS
+            // DJ filter: check if active and update coefficients if value changed
+            float djf_val = src->djf_value ? *src->djf_value : 0.5f;
+            int djf_active = (djf_val < 0.49f || djf_val > 0.51f);
+            if (djf_active && (!src->djf_initialized || fabsf(djf_val - src->djf_last_value) > 0.001f)) {
+                float sr = (float)src->sample_rate;
+                if (djf_val < 0.5f) {
+                    // LP mode: cutoff sweeps 100Hz (val=0) to 20kHz (val=0.5)
+                    float t = djf_val / 0.5f; // 0..1
+                    float cutoff = 100.0f * powf(200.0f, t); // 100 to 20000
+                    for (unsigned int ch = 0; ch < src->channels; ch++) {
+                        lp_init(&src->djf_lp[ch][0], cutoff, sr);
+                        lp_init(&src->djf_lp[ch][1], cutoff, sr);
+                    }
+                } else {
+                    // HP mode: cutoff sweeps 20Hz (val=0.5) to 5kHz (val=1.0)
+                    float t = (djf_val - 0.5f) / 0.5f; // 0..1
+                    float cutoff = 20.0f * powf(250.0f, t); // 20 to 5000
+                    for (unsigned int ch = 0; ch < src->channels; ch++) {
+                        hp_init(&src->djf_hp[ch][0], cutoff, sr);
+                        hp_init(&src->djf_hp[ch][1], cutoff, sr);
+                    }
+                }
+                src->djf_last_value = djf_val;
+                src->djf_initialized = 1;
+            }
+
+            // Advance automations once per chunk (not per-sample)
+            DJSound* auto_snd = (DJSound*)src->owner;
+            if (auto_snd) {
+                ma_uint64 chunk_mid = src->output_frame_count + retrieved / 2;
+                for (int p = 0; p < DJ_PARAM_COUNT; p++) {
+                    DJAutomation* a = &auto_snd->automations[p];
+                    if (!a->active) continue;
+                    float t;
+                    if (a->duration_frames == 0) {
+                        t = 1.0f;
+                    } else if (chunk_mid >= a->start_frame + a->duration_frames) {
+                        t = 1.0f;
+                    } else if (chunk_mid <= a->start_frame) {
+                        t = 0.0f;
+                    } else {
+                        t = (float)(chunk_mid - a->start_frame) / (float)a->duration_frames;
+                    }
+                    switch (a->interp) {
+                        case DJ_INTERP_EASE_IN:  t = t * t; break;
+                        case DJ_INTERP_EASE_OUT: t = 1.0f - (1.0f - t) * (1.0f - t); break;
+                        default: break;
+                    }
+                    float val = a->start_value + (a->end_value - a->start_value) * t;
+                    a->current_value = val;
+                    if (p == DJ_PARAM_FILTER) {
+                        auto_snd->filter_value = val;
+                    } else if (p == DJ_PARAM_VOLUME) {
+                        auto_snd->volume = val;
+                        ma_sound_set_volume(&auto_snd->sound, val);
+                    } else if (p == DJ_PARAM_EQ_LO) {
+                        auto_snd->eq_lo = val;
+                    } else if (p == DJ_PARAM_EQ_MID) {
+                        auto_snd->eq_mid = val;
+                    } else if (p == DJ_PARAM_EQ_HI) {
+                        auto_snd->eq_hi = val;
+                    }
+                    // Deactivate when done
+                    if (a->duration_frames == 0 || chunk_mid >= a->start_frame + a->duration_frames) {
+                        a->active = 0;
+                    }
+                }
+                // Re-read filter value after automation may have changed it
+                djf_val = src->djf_value ? *src->djf_value : 0.5f;
+                djf_active = (djf_val < 0.49f || djf_val > 0.51f);
+                if (djf_active && (!src->djf_initialized || fabsf(djf_val - src->djf_last_value) > 0.001f)) {
+                    float sr = (float)src->sample_rate;
+                    if (djf_val < 0.5f) {
+                        float ft = djf_val / 0.5f;
+                        float cutoff = 100.0f * powf(200.0f, ft);
+                        for (unsigned int ch = 0; ch < src->channels; ch++) {
+                            lp_init(&src->djf_lp[ch][0], cutoff, sr);
+                            lp_init(&src->djf_lp[ch][1], cutoff, sr);
+                        }
+                    } else {
+                        float ft = (djf_val - 0.5f) / 0.5f;
+                        float cutoff = 20.0f * powf(250.0f, ft);
+                        for (unsigned int ch = 0; ch < src->channels; ch++) {
+                            hp_init(&src->djf_hp[ch][0], cutoff, sr);
+                            hp_init(&src->djf_hp[ch][1], cutoff, sr);
+                        }
+                    }
+                    src->djf_last_value = djf_val;
+                    src->djf_initialized = 1;
+                }
+            }
+
+            // Read EQ gains after automation (automation may have updated them)
             float lo_g = src->eq_lo_gain ? *src->eq_lo_gain : 1.0f;
             float mi_g = src->eq_mid_gain ? *src->eq_mid_gain : 1.0f;
             float hi_g = src->eq_hi_gain ? *src->eq_hi_gain : 1.0f;
@@ -137,20 +279,55 @@ static ma_result stretched_read(ma_data_source* pDataSource, void* pFramesOut, m
                     float mid = sample - lo - hi;
                     // Apply gains and sum
                     float result = lo * lo_g + mid * mi_g + hi * hi_g;
+                    // Apply DJ filter after EQ
+                    if (djf_active) {
+                        if (djf_val < 0.5f) {
+                            result = lp_process(&src->djf_lp[ch][1],
+                                     lp_process(&src->djf_lp[ch][0], result));
+                        } else {
+                            result = hp_process(&src->djf_hp[ch][1],
+                                     hp_process(&src->djf_hp[ch][0], result));
+                        }
+                    }
                     out[(frames_written + i) * src->channels + ch] = result;
                     // RMS accumulation
                     src->rms_sum += (double)(result * result);
                     src->rms_count++;
                 }
             }
+            src->output_frame_count += retrieved;
             frames_written += retrieved;
+
+            // Compute sync diff: only write when we are the SECOND track to run this callback.
+            // The second track has fresh output_frame_count for both itself and its partner,
+            // so the diff is accurate. The first track would read a stale partner count.
+            // We detect ordering by comparing partner->output_frame_count to the last value
+            // we saw: if it advanced, partner already ran this callback → we are second.
+            if (src->phase_partner && src->phase_bar_frames > 0) {
+                DJStretchedSource* partner = src->phase_partner;
+                ma_uint64 partner_count = partner->output_frame_count;
+                if (partner_count > src->phase_partner_prev_count) {
+                    // Partner already ran this callback — our diff is authoritative
+                    ma_uint64 bar = src->phase_bar_frames;
+                    ma_uint64 my_phase = (src->output_frame_count - src->phase_origin) % bar;
+                    ma_uint64 partner_phase = (partner_count - partner->phase_origin) % bar;
+                    ma_int64 d = (ma_int64)my_phase - (ma_int64)partner_phase;
+                    if (d > (ma_int64)(bar / 2)) d -= (ma_int64)bar;
+                    if (d < -(ma_int64)(bar / 2)) d += (ma_int64)bar;
+                    atomic_store_explicit(&src->phase_diff, (float)d / (float)src->sample_rate, memory_order_relaxed);
+                }
+                // Always update our stored partner count for the next callback
+                src->phase_partner_prev_count = partner_count;
+            }
+
             continue;
         }
 
-        // Loop support: wrap cursor at loop end
-        if (src->loop_active && src->read_cursor >= src->loop_end_frame && src->loop_end_frame > src->loop_start_frame) {
+        // Loop: just wrap input cursor when it passes the end.
+        // The input-clamping below handles feeding loop-start PCM seamlessly.
+        if (src->loop_active && src->read_cursor >= src->loop_end_frame &&
+            src->loop_end_frame > src->loop_start_frame) {
             src->read_cursor = src->loop_start_frame;
-            rubberband_reset(src->rb);
         }
 
         // Need to feed more input to Rubber Band
@@ -164,13 +341,14 @@ static ma_result stretched_read(ma_data_source* pDataSource, void* pFramesOut, m
             to_feed = (unsigned int)(src->total_frames - src->read_cursor);
         }
 
-        // If looping, don't feed past loop end
+        // If looping, don't feed past loop end (input-frame clamping)
         if (src->loop_active && src->loop_end_frame > src->loop_start_frame) {
             if (src->read_cursor + to_feed > src->loop_end_frame) {
                 to_feed = (unsigned int)(src->loop_end_frame - src->read_cursor);
                 if (to_feed == 0) {
+                    // Input exhausted but output tracking hasn't triggered wrap yet.
+                    // Feed from loop start to keep Rubber Band's buffer full.
                     src->read_cursor = src->loop_start_frame;
-                    rubberband_reset(src->rb);
                     continue;
                 }
             }
@@ -319,6 +497,18 @@ static DJStretchedSource* create_stretched_source(const char* filepath, ma_uint3
     src->loop_start_frame = 0;
     src->loop_end_frame = 0;
     src->loop_active = 0;
+    src->loop_output_start = 0;
+    src->loop_output_duration = 0;
+    src->loop_output_tracking = 0;
+    src->djf_value = NULL;
+    src->djf_initialized = 0;
+    src->djf_last_value = 0.5f;
+    src->output_frame_count = 0;
+    src->phase_origin = 0;
+    src->phase_bar_frames = 0;
+    src->phase_partner = NULL;
+    atomic_store(&src->phase_diff, 0.0f);
+    src->phase_partner_prev_count = 0;
 
     // Init data source base
     ma_data_source_config baseConfig = ma_data_source_config_init();
@@ -472,6 +662,18 @@ void* dj_load_sound(void* engine, const char* filepath) {
     source->eq_mid_gain = &snd->eq_mid;
     source->eq_hi_gain = &snd->eq_hi;
 
+    // Wire DJ filter pointer
+    snd->filter_value = 0.5f;  // bypass
+    source->djf_value = &snd->filter_value;
+
+    // Back-pointer for automation access from audio callback
+    source->owner = snd;
+
+    // Init automations
+    for (int i = 0; i < DJ_PARAM_COUNT; i++) {
+        snd->automations[i].active = 0;
+    }
+
     return snd;
 }
 
@@ -524,7 +726,12 @@ int dj_stop(void* sound) {
 int dj_seek(void* sound, float seconds) {
     if (!sound) return -1;
     DJSound* snd = (DJSound*)sound;
-    ma_uint64 frame = (ma_uint64)(seconds * (float)snd->source->sample_rate);
+    // seconds is in file-time (source time).
+    // ma_sound_seek_to_pcm_frame expects output frames, which the data source
+    // vtable's onSeek converts back to input frames by dividing by time_ratio.
+    double time_ratio = (snd->source && snd->source->time_ratio > 0.0)
+        ? snd->source->time_ratio : 1.0;
+    ma_uint64 frame = (ma_uint64)(seconds * time_ratio * (double)snd->source->sample_rate);
     return ma_sound_seek_to_pcm_frame(&snd->sound, frame) == MA_SUCCESS ? 0 : -1;
 }
 
@@ -534,7 +741,11 @@ float dj_get_position(void* sound) {
 
     float cursor = 0.0f;
     ma_sound_get_cursor_in_seconds(&snd->sound, &cursor);
-    return cursor;
+    // cursor is in output-time (stretched). Convert to file-time (source time)
+    // so the frontend can work entirely in file-time coordinates.
+    double time_ratio = (snd->source && snd->source->time_ratio > 0.0)
+        ? snd->source->time_ratio : 1.0;
+    return (float)((double)cursor / time_ratio);
 }
 
 float dj_get_duration(void* sound) {
@@ -561,6 +772,8 @@ void dj_set_volume(void* sound, float volume) {
     DJSound* snd = (DJSound*)sound;
     snd->volume = volume;
     ma_sound_set_volume(&snd->sound, volume);
+    // Cancel volume automation if user manually sets volume
+    snd->automations[DJ_PARAM_VOLUME].active = 0;
 }
 
 // --- Time-stretching (Rubber Band) ---
@@ -602,6 +815,115 @@ float dj_get_original_bpm(void* sound) {
 
 // --- Scheduled sync playback ---
 
+// Shared helper: start target muted, wait for RB to stabilize,
+// measure actual phase error, correct, then unmute.
+static int sync_measure_correct(DJSound* target, DJSound* source,
+                                 float target_pos, float source_beat, float bar_duration) {
+    ma_engine* engine = &source->engine->engine;
+    ma_uint32 sample_rate = ma_engine_get_sample_rate(engine);
+
+    // Step 0: Seek target to the same bar phase as source.
+    // Source is at src_now. In 100ms it'll be at src_now + 0.1.
+    // We need target to also be at that bar phase after 100ms.
+    // So seek target to: target_pos + source_bar_phase.
+    // This puts target at the right bar phase from the start.
+    {
+        float src_now = 0.0f;
+        ma_sound_get_cursor_in_seconds(&source->sound, &src_now);
+        // Source position after 100ms warmup
+        float src_future = src_now + 0.1f;
+        // Source's bar phase at that time
+        float src_phase = fmodf(src_future - source_beat, bar_duration);
+        if (src_phase < 0) src_phase += bar_duration;
+        // Target should be at target_pos (a bar start) + src_phase
+        target_pos = target_pos + src_phase;
+        float dur = dj_get_duration(target);
+        if (dur > 0 && target_pos > dur) target_pos = fmodf(target_pos, dur);
+        fprintf(stderr, "[sync_mc] seek tgt=%.4f (base + src_phase=%.4f) src_now=%.4f\n",
+                target_pos, src_phase, src_now);
+    }
+
+    // Step 1: Seek and start muted
+    dj_seek(target, target_pos);
+    ma_sound_set_volume(&target->sound, 0.0f);
+    ma_sound_set_start_time_in_pcm_frames(&target->sound, 0);
+    ma_result r = ma_sound_start(&target->sound);
+    if (r != MA_SUCCESS) {
+        ma_sound_set_volume(&target->sound, target->volume);
+        fprintf(stderr, "[sync_mc] start failed (%d)\n", r);
+        return -1;
+    }
+
+    // Step 2: Wait 100ms for RB to stabilize
+    ma_uint64 wait_start = ma_engine_get_time_in_pcm_frames(engine);
+    ma_uint64 wait_frames = sample_rate / 10;
+    while (ma_engine_get_time_in_pcm_frames(engine) < wait_start + wait_frames) {
+        ma_yield();
+    }
+
+    // Step 3: Measure actual phase error.
+    // Both tracks should be at the same bar-phase. Compute each track's
+    // phase within a bar relative to their respective reference beats.
+    float src_pos = 0.0f, tgt_pos = 0.0f;
+    ma_sound_get_cursor_in_seconds(&source->sound, &src_pos);
+    ma_sound_get_cursor_in_seconds(&target->sound, &tgt_pos);
+
+    // Use the SAME reference point for both: source_beat.
+    // Both tracks share the same beat grid (same or synced BPM).
+    float src_phase = fmodf(src_pos - source_beat, bar_duration);
+    if (src_phase < 0) src_phase += bar_duration;
+    float tgt_phase = fmodf(tgt_pos - source_beat, bar_duration);
+    if (tgt_phase < 0) tgt_phase += bar_duration;
+
+    // The error: how much target needs to shift to match source's bar phase
+    float phase_error = src_phase - tgt_phase;
+    if (phase_error > bar_duration / 2) phase_error -= bar_duration;
+    if (phase_error < -bar_duration / 2) phase_error += bar_duration;
+
+    // Step 4: Correct read_cursor by the exact measured error
+    if (fabsf(phase_error) > 0.0001f && target->source) {
+        int correction = (int)(phase_error * (float)sample_rate / target->source->time_ratio);
+        ma_int64 corrected = (ma_int64)target->source->read_cursor + correction;
+        if (corrected < 0) corrected = 0;
+        if ((ma_uint64)corrected > target->source->total_frames)
+            corrected = (ma_int64)target->source->total_frames;
+        target->source->read_cursor = (ma_uint64)corrected;
+    }
+
+    // Step 5: Unmute
+    ma_sound_set_volume(&target->sound, target->volume);
+
+    // Step 6: Set phase origins for output-frame-based sync measurement.
+    // After correction, both tracks are at the same bar-phase.
+    // Compute source's current bar-phase in output frames and set origins so that
+    // (output_frame_count - phase_origin) % bar_frames gives the same value for both.
+    ma_uint64 bar_frames = (ma_uint64)(bar_duration * (float)sample_rate);
+    if (bar_frames > 0) {
+        // Source's bar-phase in seconds (after correction)
+        float corrected_src_pos = 0.0f;
+        ma_sound_get_cursor_in_seconds(&source->sound, &corrected_src_pos);
+        float src_bar_phase_sec = fmodf(corrected_src_pos - source_beat, bar_duration);
+        if (src_bar_phase_sec < 0) src_bar_phase_sec += bar_duration;
+        ma_uint64 phase_in_frames = (ma_uint64)(src_bar_phase_sec * (float)sample_rate);
+
+        // origin = output_frame_count - phase_in_frames
+        // (so that (ofc - origin) % bar_frames == phase_in_frames)
+        source->source->phase_bar_frames = bar_frames;
+        source->source->phase_origin = source->source->output_frame_count - phase_in_frames;
+        source->source->phase_partner = target->source;
+
+        target->source->phase_bar_frames = bar_frames;
+        target->source->phase_origin = target->source->output_frame_count - phase_in_frames;
+        target->source->phase_partner = source->source;
+    }
+
+    fprintf(stderr, "[sync_mc] src=%.4f tgt=%.4f err=%.2fms correction=%d\n",
+            src_pos, tgt_pos, phase_error * 1000,
+            (fabsf(phase_error) > 0.0001f && target->source)
+                ? (int)(phase_error * (float)sample_rate / target->source->time_ratio) : 0);
+    return 0;
+}
+
 int dj_schedule_sync_play(void* target_sound, float target_seconds,
                           void* source_sound, float source_seconds) {
     if (!target_sound || !source_sound) return -1;
@@ -616,56 +938,34 @@ int dj_schedule_sync_play(void* target_sound, float target_seconds,
     ma_engine* engine = &source->engine->engine;
     ma_uint32 sample_rate = ma_engine_get_sample_rate(engine);
 
-    float source_pos = 0.0f;
-    ma_sound_get_cursor_in_seconds(&source->sound, &source_pos);
-
-    float seconds_until_trigger = source_seconds - source_pos;
-    ma_uint64 engine_time = ma_engine_get_time_in_pcm_frames(engine);
-    ma_uint64 start_time;
-
-    if (seconds_until_trigger <= 0) {
-        // Already past trigger — start immediately, adjust target to compensate
-        float overshoot = -seconds_until_trigger;
-        target_seconds += overshoot;
-        start_time = engine_time; // start at next audio callback (sample-accurate)
-    } else {
-        ma_uint64 frames_until_trigger = (ma_uint64)(seconds_until_trigger * (float)sample_rate);
-        start_time = engine_time + frames_until_trigger;
-    }
-
-    // Match tempo: if both tracks have BPM info, adjust target tempo
+    // Match tempo
     if (source->original_bpm > 0 && target->original_bpm > 0) {
         float source_effective_bpm = source->original_bpm * dj_get_tempo(source_sound);
         float ratio = source_effective_bpm / target->original_bpm;
         dj_set_tempo(target_sound, ratio);
     }
 
-    float target_seek_seconds = target_seconds;
-    if (target->source && target->source->rb) {
-        unsigned int start_delay_frames = rubberband_get_start_delay(target->source->rb);
-        float start_delay_seconds =
-            ((float)start_delay_frames / (float)sample_rate) * (float)target->source->time_ratio;
-        target_seek_seconds -= start_delay_seconds;
-        if (target_seek_seconds < 0.0f) {
-            target_seek_seconds = 0.0f;
-        }
-        fprintf(stderr,
-                "[schedule_sync] src=%.4f trigger=%.4f tgt=%.4f seek=%.4f rb_delay=%.2fms\n",
-                source_pos, source_seconds, target_seconds, target_seek_seconds,
-                start_delay_seconds * 1000.0f);
+    float source_pos = 0.0f;
+    ma_sound_get_cursor_in_seconds(&source->sound, &source_pos);
+
+    float seconds_until_trigger = source_seconds - source_pos;
+    if (seconds_until_trigger <= 0) {
+        target_seconds += (-seconds_until_trigger);
     }
 
-    ma_uint64 target_frame = (ma_uint64)(target_seek_seconds * (float)sample_rate);
-    ma_sound_seek_to_pcm_frame(&target->sound, target_frame);
-    ma_sound_set_start_time_in_pcm_frames(&target->sound, start_time);
-    ma_result start_result = ma_sound_start(&target->sound);
-    if (start_result != MA_SUCCESS) {
-        fprintf(stderr, "[schedule_sync] ERROR: ma_sound_start failed (%d)\n", start_result);
-        return -1;
+    // Compute bar_duration from BPM for the phase measurement
+    float bar_duration = 0.0f;
+    if (source->original_bpm > 0) {
+        float effective_bpm = source->original_bpm * dj_get_tempo(source_sound);
+        bar_duration = 4.0f * 60.0f / effective_bpm;
     }
+    if (bar_duration <= 0) bar_duration = 2.0f; // fallback
 
-    target->scheduled = 1;
-    return 0;
+    // Always use measure-and-correct for exact sync.
+    // target_seconds is already adjusted for overshoot if trigger was in the past.
+    int result = sync_measure_correct(target, source, target_seconds, source_seconds, bar_duration);
+    if (result == 0) target->scheduled = 0;
+    return result;
 }
 
 int dj_sync_start(void* target_sound, float target_beat,
@@ -678,13 +978,10 @@ int dj_sync_start(void* target_sound, float target_beat,
     DJSound* target = (DJSound*)target_sound;
     DJSound* source = (DJSound*)source_sound;
 
-    // Reset target
+    // Stop & reset target
     ma_sound_stop(&target->sound);
     ma_sound_set_start_time_in_pcm_frames(&target->sound, 0);
     target->scheduled = 0;
-
-    ma_engine* engine = &source->engine->engine;
-    ma_uint32 sample_rate = ma_engine_get_sample_rate(engine);
 
     // Match tempo
     if (source->original_bpm > 0 && target->original_bpm > 0) {
@@ -693,80 +990,26 @@ int dj_sync_start(void* target_sound, float target_beat,
         dj_set_tempo(target_sound, ratio);
     }
 
-    // Step 1: Calculate synced target position and start playing muted
+    // Compute target position
     float source_pos = 0.0f;
     ma_sound_get_cursor_in_seconds(&source->sound, &source_pos);
     float offset = source_pos - source_beat;
     float phase = 0.0f;
     if (bar_duration > 0.0f) {
         phase = fmodf(offset, bar_duration);
+        if (phase < 0) phase += bar_duration;
     }
     float target_offset = preserve_transport ? fmaxf(offset, 0.0f) : phase;
     float target_pos = target_beat + target_offset;
     float target_duration = dj_get_duration(target_sound);
-    if (target_pos < 0.0f) {
-        target_pos = 0.0f;
-    }
-    if (target_duration > 0.0f && target_pos > target_duration) {
-        target_pos = target_duration;
-    }
-    dj_seek(target_sound, target_pos);
-    ma_sound_set_volume(&target->sound, 0.0f);
-    ma_result start_result = ma_sound_start(&target->sound);
-    if (start_result != MA_SUCCESS) {
-        ma_sound_set_volume(&target->sound, target->volume);
-        fprintf(stderr, "[sync_start] ERROR: ma_sound_start failed (%d)\n", start_result);
-        return -1;
-    }
+    if (target_pos < 0.0f) target_pos = 0.0f;
+    if (target_duration > 0.0f && target_pos > target_duration) target_pos = target_duration;
 
-    // Step 2: Wait for Rubber Band to stabilize
-    ma_uint64 wait_start = ma_engine_get_time_in_pcm_frames(engine);
-    ma_uint64 wait_frames = sample_rate / 10; // 100ms
-    while (ma_engine_get_time_in_pcm_frames(engine) < wait_start + wait_frames) {
-        ma_yield();
-    }
+    // Use measure-and-correct for exact sync
+    int result = sync_measure_correct(target, source, target_pos, source_beat, bar_duration);
 
-    // Step 3: Measure exact phase error
-    float src_after = 0.0f, tgt_after = 0.0f;
-    ma_sound_get_cursor_in_seconds(&source->sound, &src_after);
-    ma_sound_get_cursor_in_seconds(&target->sound, &tgt_after);
-
-    float src_phase = fmodf(src_after - source_beat, bar_duration);
-    float tgt_phase = fmodf(tgt_after - target_beat, bar_duration);
-    if (src_phase < 0) src_phase += bar_duration;
-    if (tgt_phase < 0) tgt_phase += bar_duration;
-
-    float phase_error = src_phase - tgt_phase;
-    if (phase_error > bar_duration / 2) phase_error -= bar_duration;
-    if (phase_error < -bar_duration / 2) phase_error += bar_duration;
-
-    fprintf(stderr, "[sync_start] src=%.4f tgt=%.4f err=%.2fms\n",
-            src_after, tgt_after, phase_error * 1000);
-
-    // Step 4: Apply correction to read_cursor (no rb_reset — keeps it warmed up).
-    // The correction propagates smoothly through RB's buffer (~30ms transition).
-    if (fabsf(phase_error) > 0.0001f) {
-        int correction = (int)(phase_error * (float)sample_rate / target->source->time_ratio);
-        ma_int64 corrected = (ma_int64)target->source->read_cursor + correction;
-        if (corrected < 0) corrected = 0;
-        if ((ma_uint64)corrected > target->source->total_frames) {
-            corrected = (ma_int64)target->source->total_frames;
-        }
-        target->source->read_cursor = (ma_uint64)corrected;
-        fprintf(stderr, "[sync_start] corrected by %d frames (%.1fms)\n",
-                correction, phase_error * 1000);
-    }
-
-    // Step 5: Unmute
-    ma_sound_set_volume(&target->sound, target->volume);
-
-    // Verify
-    ma_sound_get_cursor_in_seconds(&source->sound, &src_after);
-    ma_sound_get_cursor_in_seconds(&target->sound, &tgt_after);
-    fprintf(stderr, "[sync_start] AFTER src=%.4f tgt=%.4f diff=%.2fms\n",
-            src_after, tgt_after, (tgt_after - src_after) * 1000);
-
-    return 0;
+    fprintf(stderr, "[sync_start] src=%.4f tgt=%.4f result=%d\n", source_pos, target_pos, result);
+    return result;
 }
 
 int dj_cancel_scheduled_start(void* sound) {
@@ -777,6 +1020,35 @@ int dj_cancel_scheduled_start(void* sound) {
     return 0;
 }
 
+float dj_get_sync_diff(void* sound1, void* sound2, float beat_ref, float bar_duration) {
+    if (!sound1 || !sound2 || bar_duration <= 0) return 0.0f;
+    DJSound* s1 = (DJSound*)sound1;
+    DJSound* s2 = (DJSound*)sound2;
+
+    // Use pre-computed phase diff from the audio callback (race-free)
+    if (s1->source && s2->source &&
+        s1->source->phase_bar_frames > 0 && s1->source->phase_partner == s2->source) {
+        return atomic_load_explicit(&s1->source->phase_diff, memory_order_relaxed);
+    }
+    if (s2->source && s1->source &&
+        s2->source->phase_bar_frames > 0 && s2->source->phase_partner == s1->source) {
+        return -atomic_load_explicit(&s2->source->phase_diff, memory_order_relaxed);
+    }
+
+    // Fallback: cursor-based estimation (less precise)
+    float p1 = 0.0f, p2 = 0.0f;
+    ma_sound_get_cursor_in_seconds(&s1->sound, &p1);
+    ma_sound_get_cursor_in_seconds(&s2->sound, &p2);
+    float phase1 = fmodf(p1 - beat_ref, bar_duration);
+    float phase2 = fmodf(p2 - beat_ref, bar_duration);
+    if (phase1 < 0) phase1 += bar_duration;
+    if (phase2 < 0) phase2 += bar_duration;
+    float diff = phase1 - phase2;
+    if (diff > bar_duration / 2) diff -= bar_duration;
+    if (diff < -bar_duration / 2) diff += bar_duration;
+    return diff;
+}
+
 // --- EQ (3-band gain: 0=kill, 1=unity, 2=boost) ---
 
 void dj_set_eq(void* sound, float lo, float mid, float hi) {
@@ -785,6 +1057,103 @@ void dj_set_eq(void* sound, float lo, float mid, float hi) {
     snd->eq_lo = lo;
     snd->eq_mid = mid;
     snd->eq_hi = hi;
+    // Cancel EQ automations on manual override
+    snd->automations[DJ_PARAM_EQ_LO].active = 0;
+    snd->automations[DJ_PARAM_EQ_MID].active = 0;
+    snd->automations[DJ_PARAM_EQ_HI].active = 0;
+}
+
+float dj_get_eq_lo(void* sound) {
+    if (!sound) return 1.0f;
+    return ((DJSound*)sound)->eq_lo;
+}
+
+float dj_get_eq_mid(void* sound) {
+    if (!sound) return 1.0f;
+    return ((DJSound*)sound)->eq_mid;
+}
+
+float dj_get_eq_hi(void* sound) {
+    if (!sound) return 1.0f;
+    return ((DJSound*)sound)->eq_hi;
+}
+
+// --- DJ filter (single knob LP/HP sweep) ---
+
+void dj_set_filter(void* sound, float value) {
+    if (!sound) return;
+    DJSound* snd = (DJSound*)sound;
+    if (value < 0.0f) value = 0.0f;
+    if (value > 1.0f) value = 1.0f;
+    snd->filter_value = value;
+    // Cancel filter automation if user manually sets filter
+    snd->automations[DJ_PARAM_FILTER].active = 0;
+}
+
+float dj_get_filter(void* sound) {
+    if (!sound) return 0.5f;
+    DJSound* snd = (DJSound*)sound;
+    return snd->filter_value;
+}
+
+// --- Parameter automation ---
+
+void dj_set_automation(void* sound, int param, float start_val, float end_val,
+                       float duration_seconds, int interp) {
+    if (!sound || param < 0 || param >= DJ_PARAM_COUNT) return;
+    DJSound* snd = (DJSound*)sound;
+    DJAutomation* a = &snd->automations[param];
+
+    a->start_value = start_val;
+    a->end_value = end_val;
+    a->interp = interp;
+
+    if (snd->source) {
+        ma_uint32 sr = snd->source->sample_rate;
+        a->start_frame = snd->source->output_frame_count;
+        a->duration_frames = (ma_uint64)(duration_seconds * sr);
+    } else {
+        a->start_frame = 0;
+        a->duration_frames = 0;
+    }
+    a->current_value = start_val;
+
+    // Apply start value immediately
+    if (param == DJ_PARAM_FILTER) {
+        snd->filter_value = start_val;
+    } else if (param == DJ_PARAM_VOLUME) {
+        ma_sound_set_volume(&snd->sound, start_val);
+    } else if (param == DJ_PARAM_EQ_LO) {
+        snd->eq_lo = start_val;
+    } else if (param == DJ_PARAM_EQ_MID) {
+        snd->eq_mid = start_val;
+    } else if (param == DJ_PARAM_EQ_HI) {
+        snd->eq_hi = start_val;
+    }
+
+    a->active = 1;
+    printf("[automation] param=%d start=%.3f end=%.3f dur=%.3fs interp=%d\n",
+           param, start_val, end_val, duration_seconds, interp);
+}
+
+void dj_cancel_automation(void* sound, int param) {
+    if (!sound || param < 0 || param >= DJ_PARAM_COUNT) return;
+    DJSound* snd = (DJSound*)sound;
+    snd->automations[param].active = 0;
+}
+
+float dj_get_automation_value(void* sound, int param) {
+    if (!sound || param < 0 || param >= DJ_PARAM_COUNT) return -1.0f;
+    DJSound* snd = (DJSound*)sound;
+    DJAutomation* a = &snd->automations[param];
+    if (!a->active) return -1.0f;
+    return a->current_value;
+}
+
+int dj_is_automation_active(void* sound, int param) {
+    if (!sound || param < 0 || param >= DJ_PARAM_COUNT) return 0;
+    DJSound* snd = (DJSound*)sound;
+    return snd->automations[param].active;
 }
 
 // --- Loop control ---
@@ -797,6 +1166,11 @@ void dj_set_loop(void* sound, float start_seconds, float end_seconds) {
     snd->source->loop_start_frame = (ma_uint64)(start_seconds * (float)sr);
     snd->source->loop_end_frame = (ma_uint64)(end_seconds * (float)sr);
     snd->source->loop_active = 1;
+    // Compute exact output-frame loop duration
+    // Output duration = input duration * time_ratio (Rubber Band stretching)
+    double input_duration_frames = (double)(snd->source->loop_end_frame - snd->source->loop_start_frame);
+    snd->source->loop_output_duration = (ma_uint64)(input_duration_frames * snd->source->time_ratio);
+    snd->source->loop_output_tracking = 0; // will be set on first entry
 }
 
 void dj_clear_loop(void* sound) {
@@ -804,6 +1178,7 @@ void dj_clear_loop(void* sound) {
     DJSound* snd = (DJSound*)sound;
     if (!snd->source) return;
     snd->source->loop_active = 0;
+    snd->source->loop_output_tracking = 0;
 }
 
 int dj_is_looping(void* sound) {
@@ -1365,4 +1740,235 @@ int dj_detect_beats(const char* filepath, float* out_beats, int max_beats) {
     }
 
     return beat_count;
+}
+
+// ============================================================
+// MIDI (CoreMIDI) — ring buffer for lock-free message passing
+// ============================================================
+
+#define MIDI_RING_SIZE 512
+#define MIDI_NAME_BUF 256
+
+typedef struct {
+    MIDIClientRef client;
+    MIDIPortRef input_port;
+    MIDIPortRef output_port;
+    MIDIEndpointRef current_source;
+    MIDIEndpointRef current_dest;
+    int initialized;
+
+    // Lock-free ring buffer (single producer, single consumer)
+    DjMidiMessage ring[MIDI_RING_SIZE];
+    _Atomic uint32_t write_idx;
+    _Atomic uint32_t read_idx;
+
+    // Source/dest name cache
+    char source_names[64][MIDI_NAME_BUF];
+    int source_count;
+    char dest_names[64][MIDI_NAME_BUF];
+    int dest_count;
+} DjMidiGlobal;
+
+static DjMidiGlobal g_midi = {0};
+
+static void midi_get_endpoint_name(MIDIEndpointRef endpoint, char* buf, int bufsize) {
+    CFStringRef name = NULL;
+    MIDIObjectGetStringProperty(endpoint, kMIDIPropertyDisplayName, &name);
+    if (!name) MIDIObjectGetStringProperty(endpoint, kMIDIPropertyName, &name);
+    if (name) {
+        CFStringGetCString(name, buf, bufsize, kCFStringEncodingUTF8);
+        CFRelease(name);
+    } else {
+        buf[0] = '\0';
+    }
+}
+
+// CoreMIDI read callback — runs on CoreMIDI's thread
+static void midi_read_proc(const MIDIPacketList* pktList, void* readProcRefCon, void* srcConnRefCon) {
+    (void)readProcRefCon;
+    (void)srcConnRefCon;
+    const MIDIPacket* pkt = &pktList->packet[0];
+    for (UInt32 i = 0; i < pktList->numPackets; i++) {
+        // Parse MIDI bytes
+        for (UInt16 j = 0; j < pkt->length; ) {
+            uint8_t status = pkt->data[j];
+            if (status < 0x80) { j++; continue; } // skip data bytes
+            uint8_t channel = status & 0x0F;
+            uint8_t type = status & 0xF0;
+            int data_bytes = 0;
+            switch (type) {
+                case 0x80: case 0x90: case 0xA0: case 0xB0: case 0xE0:
+                    data_bytes = 2; break;
+                case 0xC0: case 0xD0:
+                    data_bytes = 1; break;
+                case 0xF0:
+                    // System messages — skip
+                    j++; continue;
+                default:
+                    j++; continue;
+            }
+            if (j + 1 + data_bytes > pkt->length) break;
+
+            uint8_t d1 = (data_bytes >= 1) ? pkt->data[j + 1] : 0;
+            uint8_t d2 = (data_bytes >= 2) ? pkt->data[j + 2] : 0;
+
+            // Write to ring buffer
+            uint32_t wi = atomic_load_explicit(&g_midi.write_idx, memory_order_relaxed);
+            uint32_t next_wi = (wi + 1) % MIDI_RING_SIZE;
+            uint32_t ri = atomic_load_explicit(&g_midi.read_idx, memory_order_acquire);
+            if (next_wi != ri) { // not full
+                g_midi.ring[wi].status = type;
+                g_midi.ring[wi].data1 = d1;
+                g_midi.ring[wi].data2 = d2;
+                g_midi.ring[wi].channel = channel;
+                atomic_store_explicit(&g_midi.write_idx, next_wi, memory_order_release);
+            }
+            j += 1 + data_bytes;
+        }
+        pkt = MIDIPacketNext(pkt);
+    }
+}
+
+int dj_midi_init(void) {
+    if (g_midi.initialized) return 0;
+
+    OSStatus status = MIDIClientCreate(CFSTR("JensDJ"), NULL, NULL, &g_midi.client);
+    if (status != noErr) {
+        fprintf(stderr, "[MIDI] MIDIClientCreate failed: %d\n", (int)status);
+        return -1;
+    }
+
+    status = MIDIInputPortCreate(g_midi.client, CFSTR("JensDJ Input"), midi_read_proc, NULL, &g_midi.input_port);
+    if (status != noErr) {
+        fprintf(stderr, "[MIDI] MIDIInputPortCreate failed: %d\n", (int)status);
+        MIDIClientDispose(g_midi.client);
+        return -2;
+    }
+
+    status = MIDIOutputPortCreate(g_midi.client, CFSTR("JensDJ Output"), &g_midi.output_port);
+    if (status != noErr) {
+        fprintf(stderr, "[MIDI] MIDIOutputPortCreate failed (non-fatal): %d\n", (int)status);
+        // Output is optional, don't fail
+    }
+
+    atomic_store(&g_midi.write_idx, 0);
+    atomic_store(&g_midi.read_idx, 0);
+    g_midi.current_source = 0;
+    g_midi.current_dest = 0;
+
+    // Enumerate sources
+    g_midi.source_count = (int)MIDIGetNumberOfSources();
+    if (g_midi.source_count > 64) g_midi.source_count = 64;
+    for (int i = 0; i < g_midi.source_count; i++) {
+        MIDIEndpointRef src = MIDIGetSource(i);
+        midi_get_endpoint_name(src, g_midi.source_names[i], MIDI_NAME_BUF);
+        fprintf(stderr, "[MIDI] Source %d: %s\n", i, g_midi.source_names[i]);
+    }
+
+    // Enumerate destinations
+    g_midi.dest_count = (int)MIDIGetNumberOfDestinations();
+    if (g_midi.dest_count > 64) g_midi.dest_count = 64;
+    for (int i = 0; i < g_midi.dest_count; i++) {
+        MIDIEndpointRef dst = MIDIGetDestination(i);
+        midi_get_endpoint_name(dst, g_midi.dest_names[i], MIDI_NAME_BUF);
+        fprintf(stderr, "[MIDI] Destination %d: %s\n", i, g_midi.dest_names[i]);
+    }
+
+    g_midi.initialized = 1;
+    fprintf(stderr, "[MIDI] Initialized: %d sources, %d destinations\n",
+            g_midi.source_count, g_midi.dest_count);
+    return 0;
+}
+
+void dj_midi_shutdown(void) {
+    if (!g_midi.initialized) return;
+    dj_midi_close_input();
+    dj_midi_close_output();
+    if (g_midi.output_port) MIDIPortDispose(g_midi.output_port);
+    if (g_midi.input_port) MIDIPortDispose(g_midi.input_port);
+    MIDIClientDispose(g_midi.client);
+    g_midi.initialized = 0;
+}
+
+int dj_midi_get_source_count(void) {
+    return g_midi.source_count;
+}
+
+const char* dj_midi_get_source_name(int index) {
+    if (index < 0 || index >= g_midi.source_count) return "";
+    return g_midi.source_names[index];
+}
+
+int dj_midi_open_input(int source_index) {
+    if (!g_midi.initialized) return -1;
+    if (source_index < 0 || source_index >= g_midi.source_count) return -2;
+
+    // Close existing connection
+    dj_midi_close_input();
+
+    MIDIEndpointRef src = MIDIGetSource(source_index);
+    OSStatus status = MIDIPortConnectSource(g_midi.input_port, src, NULL);
+    if (status != noErr) {
+        fprintf(stderr, "[MIDI] MIDIPortConnectSource failed: %d\n", (int)status);
+        return -3;
+    }
+
+    g_midi.current_source = src;
+    fprintf(stderr, "[MIDI] Opened input: %s\n", g_midi.source_names[source_index]);
+    return 0;
+}
+
+void dj_midi_close_input(void) {
+    if (g_midi.current_source) {
+        MIDIPortDisconnectSource(g_midi.input_port, g_midi.current_source);
+        g_midi.current_source = 0;
+    }
+}
+
+int dj_midi_poll(DjMidiMessage* out, int max_messages) {
+    if (!out || max_messages <= 0) return 0;
+    int count = 0;
+    while (count < max_messages) {
+        uint32_t ri = atomic_load_explicit(&g_midi.read_idx, memory_order_relaxed);
+        uint32_t wi = atomic_load_explicit(&g_midi.write_idx, memory_order_acquire);
+        if (ri == wi) break; // empty
+        out[count] = g_midi.ring[ri];
+        atomic_store_explicit(&g_midi.read_idx, (ri + 1) % MIDI_RING_SIZE, memory_order_release);
+        count++;
+    }
+    return count;
+}
+
+int dj_midi_get_dest_count(void) {
+    return g_midi.dest_count;
+}
+
+const char* dj_midi_get_dest_name(int index) {
+    if (index < 0 || index >= g_midi.dest_count) return "";
+    return g_midi.dest_names[index];
+}
+
+int dj_midi_open_output(int dest_index) {
+    if (!g_midi.initialized) return -1;
+    if (dest_index < 0 || dest_index >= g_midi.dest_count) return -2;
+    dj_midi_close_output();
+    g_midi.current_dest = MIDIGetDestination(dest_index);
+    fprintf(stderr, "[MIDI] Opened output: %s\n", g_midi.dest_names[dest_index]);
+    return 0;
+}
+
+int dj_midi_send(uint8_t status, uint8_t data1, uint8_t data2) {
+    if (!g_midi.initialized || !g_midi.current_dest || !g_midi.output_port) return -1;
+    Byte buffer[128];
+    MIDIPacketList* pktList = (MIDIPacketList*)buffer;
+    MIDIPacket* pkt = MIDIPacketListInit(pktList);
+    Byte msg[3] = { status, data1, data2 };
+    pkt = MIDIPacketListAdd(pktList, sizeof(buffer), pkt, 0, 3, msg);
+    if (!pkt) return -2;
+    OSStatus result = MIDISend(g_midi.output_port, g_midi.current_dest, pktList);
+    return result == noErr ? 0 : -3;
+}
+
+void dj_midi_close_output(void) {
+    g_midi.current_dest = 0;
 }
