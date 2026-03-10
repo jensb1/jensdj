@@ -81,6 +81,29 @@ const lib = dlopen(libPath, {
     args: [FFIType.ptr, FFIType.ptr, FFIType.f32, FFIType.f32],
     returns: FFIType.f32,
   },
+  dj_get_track_sync_diff: {
+    args: [FFIType.ptr],
+    returns: FFIType.f32,
+  },
+  dj_set_global_clock: {
+    args: [FFIType.f32],
+    returns: FFIType.void,
+  },
+  dj_align_global_clock: {
+    args: [FFIType.ptr],
+    returns: FFIType.void,
+  },
+  dj_get_global_phase: {
+    returns: FFIType.f32,
+  },
+  dj_set_beat_ref: {
+    args: [FFIType.ptr, FFIType.f32],
+    returns: FFIType.void,
+  },
+  dj_get_beat_ref: {
+    args: [FFIType.ptr],
+    returns: FFIType.f32,
+  },
   dj_set_loop: {
     args: [FFIType.ptr, FFIType.f32, FFIType.f32],
     returns: FFIType.void,
@@ -130,6 +153,20 @@ const lib = dlopen(libPath, {
     args: [FFIType.cstring, FFIType.ptr, FFIType.i32],
     returns: FFIType.i32,
   },
+  dj_pull_frames: { args: [FFIType.ptr, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+  dj_find_transients: { args: [FFIType.ptr, FFIType.i32, FFIType.i32, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+  dj_get_sample_rate: { args: [FFIType.ptr], returns: FFIType.i32 },
+  dj_set_beats: { args: [FFIType.ptr, FFIType.ptr, FFIType.i32], returns: FFIType.void },
+  dj_sync_play: { args: [FFIType.ptr, FFIType.ptr, FFIType.f32], returns: FFIType.i32 },
+  dj_set_master_bpm: { args: [FFIType.f32], returns: FFIType.void },
+  dj_get_master_bpm: { returns: FFIType.f32 },
+  dj_register_track: { args: [FFIType.ptr], returns: FFIType.void },
+  dj_unregister_track: { args: [FFIType.ptr], returns: FFIType.void },
+  dj_free_beat_grid: { args: [FFIType.ptr], returns: FFIType.void },
+  dj_get_output_frame_count: { args: [FFIType.ptr], returns: FFIType.u64 },
+  dj_get_read_cursor: { args: [FFIType.ptr], returns: FFIType.u64 },
+  dj_get_rb_latency: { args: [FFIType.ptr], returns: FFIType.i32 },
+  dj_get_rb_available: { args: [FFIType.ptr], returns: FFIType.i32 },
 });
 
 // Raw symbols - use typed wrappers below instead
@@ -284,6 +321,27 @@ export const djCancelScheduledStart = (sound: NativePtr): number =>
 export const djGetSyncDiff = (sound1: NativePtr, sound2: NativePtr, beatRef: number, barDuration: number): number =>
   s.dj_get_sync_diff(sound1 as unknown as Pointer, sound2 as unknown as Pointer, beatRef, barDuration);
 
+export const djGetTrackSyncDiff = (sound: NativePtr): number =>
+  s.dj_get_track_sync_diff(sound as unknown as Pointer);
+
+export const djSetGlobalClock = (barDuration: number): void => {
+  s.dj_set_global_clock(barDuration);
+};
+
+export const djAlignGlobalClock = (sound: NativePtr): void => {
+  s.dj_align_global_clock(sound as unknown as Pointer);
+};
+
+export const djGetGlobalPhase = (): number =>
+  s.dj_get_global_phase();
+
+export const djSetBeatRef = (sound: NativePtr, beatRef: number): void => {
+  s.dj_set_beat_ref(sound as unknown as Pointer, beatRef);
+};
+
+export const djGetBeatRef = (sound: NativePtr): number =>
+  s.dj_get_beat_ref(sound as unknown as Pointer);
+
 export const djSetLoop = (sound: NativePtr, startSec: number, endSec: number): void => {
   s.dj_set_loop(sound as unknown as Pointer, startSec, endSec);
 };
@@ -385,3 +443,72 @@ export const djDetectBeats = (
   );
   return buffer.subarray(0, count);
 };
+
+// Sync engine functions
+export const djSetBeats = (sound: NativePtr, beats: Float32Array): void => {
+  s.dj_set_beats(sound as unknown as Pointer, ptr(beats) as unknown as Pointer, beats.length);
+};
+
+export const djSyncPlay = (target: NativePtr, source: NativePtr, targetAnchorPos: number = -1): number =>
+  s.dj_sync_play(target as unknown as Pointer, source as unknown as Pointer, targetAnchorPos);
+
+export const djSetMasterBpm = (bpm: number): void => {
+  s.dj_set_master_bpm(bpm);
+};
+
+export const djGetMasterBpm = (): number =>
+  s.dj_get_master_bpm();
+
+export const djRegisterTrack = (sound: NativePtr): void => {
+  s.dj_register_track(sound as unknown as Pointer);
+};
+
+export const djUnregisterTrack = (sound: NativePtr): void => {
+  s.dj_unregister_track(sound as unknown as Pointer);
+};
+
+export const djFreeBeatGrid = (sound: NativePtr): void => {
+  s.dj_free_beat_grid(sound as unknown as Pointer);
+};
+
+// Diagnostic / test functions
+export function djGetOutputFrameCount(sound: NativePtr): number {
+  return Number(s.dj_get_output_frame_count(sound as unknown as Pointer));
+}
+export function djGetReadCursor(sound: NativePtr): number {
+  return Number(s.dj_get_read_cursor(sound as unknown as Pointer));
+}
+export function djGetRbLatency(sound: NativePtr): number {
+  return s.dj_get_rb_latency(sound as unknown as Pointer);
+}
+export function djGetRbAvailable(sound: NativePtr): number {
+  return s.dj_get_rb_available(sound as unknown as Pointer);
+}
+
+export function djPullFrames(sound: NativePtr, buffer: Float32Array): number {
+  return s.dj_pull_frames(
+    sound as unknown as Pointer,
+    ptr(buffer) as unknown as Pointer,
+    buffer.length / 2  // stereo: num_frames = buffer_length / channels
+  );
+}
+
+export function djFindTransients(
+  pcm: Float32Array,
+  sampleRate: number,
+  maxTransients: number
+): Float32Array {
+  const { buffer: outBuf, ptr: outPtr } = floatBuf(maxTransients);
+  const count = s.dj_find_transients(
+    ptr(pcm) as unknown as Pointer,
+    pcm.length,
+    sampleRate,
+    outPtr as unknown as Pointer,
+    maxTransients
+  );
+  return outBuf.subarray(0, count);
+}
+
+export function djGetSampleRate(sound: NativePtr): number {
+  return s.dj_get_sample_rate(sound as unknown as Pointer);
+}

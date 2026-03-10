@@ -72,6 +72,8 @@ export async function syncPlay(trackId: string, options: SyncPlayOptions = {}): 
       if (store.masterBpm === 0 && sourceBpm > 0) {
         store.setMasterBpm(sourceBpm);
         await window.djRpc?.request?.setMasterBpm?.({ bpm: sourceBpm });
+        // Align global clock to the already-playing source track
+        await window.djRpc?.request?.alignGlobalClock?.({ trackId: sourceId });
       }
 
 
@@ -243,6 +245,11 @@ export async function syncPlay(trackId: string, options: SyncPlayOptions = {}): 
     trackId,
     fromTime: explicitTargetAnchorPos ?? undefined,
   });
+  // First track playing: align global clock to this track's beat phase
+  // Re-read store state since setMasterBpm may have updated it above
+  if (usePlayerStore.getState().masterBpm > 0) {
+    await window.djRpc?.request?.alignGlobalClock?.({ trackId });
+  }
   const playbackState = await window.djRpc?.request?.getPlaybackState?.({ trackId });
   debugLog("syncPlay.fallbackPlay", {
     trackId,

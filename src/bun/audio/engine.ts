@@ -44,6 +44,18 @@ import {
   djGetPeaks3Band,
   djDetectBpm,
   djDetectBeats,
+  djAlignGlobalClock,
+  djGetTrackSyncDiff,
+  djSetBeatRef,
+  djGetOutputFrameCount,
+  djGetReadCursor,
+  djGetRbLatency,
+  djGetRbAvailable,
+  djSetBeats,
+  djRegisterTrack,
+  djUnregisterTrack,
+  djSetMasterBpm,
+  djGetMasterBpm,
 } from "./ffi.ts";
 import type {
   OutputDevice,
@@ -110,7 +122,7 @@ export class AudioEngine {
   private nextId = 1;
   private initialized = false;
   private _masterBpm = 0;
-  get masterBpm(): number { return this._masterBpm; }
+  get masterBpm(): number { return this._masterBpm || djGetMasterBpm(); }
   private _activeLoops = new Map<string, { start: number; end: number }>();
 
   init(): boolean {
@@ -196,13 +208,19 @@ export class AudioEngine {
       djSeek(soundPtr, firstBeat);
     }
 
-    // Store BPM in native engine for auto-sync
+    // Store BPM, beats, and beat reference in native engine
     if (analysis.bpm > 0) {
       djSetOriginalBpm(soundPtr, analysis.bpm);
-      // Auto-sync to master BPM if set
-      if (this._masterBpm > 0) {
-        djSetTempo(soundPtr, this._masterBpm / analysis.bpm);
-      }
+    }
+    if (analysis.beats.length >= 5) {
+      djSetBeats(soundPtr, new Float32Array(analysis.beats));
+    }
+    djSetBeatRef(soundPtr, track.firstBeat);
+    djRegisterTrack(soundPtr);
+
+    // Auto-sync to master BPM if set
+    if (analysis.bpm > 0 && this._masterBpm > 0) {
+      djSetTempo(soundPtr, this._masterBpm / analysis.bpm);
     }
 
     return {
@@ -240,6 +258,7 @@ export class AudioEngine {
   unloadTrack(trackId: string): void {
     const track = this.tracks.get(trackId);
     if (!track) return;
+    djUnregisterTrack(track.soundPtr);
     djUnloadSound(track.soundPtr);
     this.tracks.delete(trackId);
   }
@@ -359,14 +378,20 @@ export class AudioEngine {
     const source = this.tracks.get(sourceTrackId);
     if (!target || !source) return false;
 
+    // barDuration from buildSyncStartPlan is in source file-time.
+    // The C library needs output-time bar duration for the global clock.
+    // Convert: output_bar = file_bar / tempo (where tempo = masterBpm / originalBpm).
+    const sourceTempo = djGetTempo(source.soundPtr);
+    const outputBarDuration = sourceTempo > 0 ? barDuration / sourceTempo : barDuration;
+
     const result = djSyncStart(
       target.soundPtr, targetBeat,
       source.soundPtr, sourceBeat,
-      barDuration,
+      outputBarDuration,
       preserveTransport
     );
     console.log(
-      `[AudioEngine] syncStart: ${sourceTrackId}@beat${sourceBeat.toFixed(2)}s → ${targetTrackId}@beat${targetBeat.toFixed(2)}s bar=${barDuration.toFixed(3)}s = ${result === 0 ? "OK" : "FAIL"}`
+      `[AudioEngine] syncStart: ${sourceTrackId}@beat${sourceBeat.toFixed(2)}s → ${targetTrackId}@beat${targetBeat.toFixed(2)}s bar=${outputBarDuration.toFixed(3)}s = ${result === 0 ? "OK" : "FAIL"}`
     );
     return result === 0;
   }
@@ -410,14 +435,21 @@ export class AudioEngine {
 
   setMasterBpm(bpm: number): void {
     this._masterBpm = bpm;
-    for (const [, track] of this.tracks) {
-      const originalBpm = djGetOriginalBpm(track.soundPtr);
-      if (originalBpm > 0 && bpm > 0) {
-        djSetTempo(track.soundPtr, bpm / originalBpm);
-      } else if (bpm === 0) {
-        djSetTempo(track.soundPtr, 1.0); // Reset to original tempo
-      }
-    }
+    djSetMasterBpm(bpm);
+  }
+
+  /** Align global clock to a currently playing track's phase */
+  alignGlobalClock(trackId: string): void {
+    const track = this.tracks.get(trackId);
+    if (!track) return;
+    djAlignGlobalClock(track.soundPtr);
+  }
+
+  /** Get single track's phase diff vs global clock */
+  getTrackSyncDiff(trackId: string): number {
+    const track = this.tracks.get(trackId);
+    if (!track) return 0;
+    return djGetTrackSyncDiff(track.soundPtr);
   }
 
   setFilter(trackId: string, value: number): void {
@@ -480,5 +512,29 @@ export class AudioEngine {
 
   getAllTrackIds(): string[] {
     return Array.from(this.tracks.keys());
+  }
+
+  getOutputFrameCount(trackId: string): number {
+    const track = this.tracks.get(trackId);
+    if (!track) return 0;
+    return djGetOutputFrameCount(track.soundPtr);
+  }
+
+  getReadCursor(trackId: string): number {
+    const track = this.tracks.get(trackId);
+    if (!track) return 0;
+    return djGetReadCursor(track.soundPtr);
+  }
+
+  getRbLatency(trackId: string): number {
+    const track = this.tracks.get(trackId);
+    if (!track) return 0;
+    return djGetRbLatency(track.soundPtr);
+  }
+
+  getRbAvailable(trackId: string): number {
+    const track = this.tracks.get(trackId);
+    if (!track) return 0;
+    return djGetRbAvailable(track.soundPtr);
   }
 }

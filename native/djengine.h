@@ -45,18 +45,22 @@ void dj_clear_loop(void* sound);
 int dj_is_looping(void* sound);
 
 
-// Scheduled sync playback
-// Schedules target_sound to start playing from target_seconds,
-// timed to the exact moment source_sound reaches source_seconds.
-// Both sounds MUST be on the same engine. Returns 0 on success.
+// Global beat clock — one absolute grid for all tracks
+// bar_duration: duration of one bar in seconds (e.g. 4*60/bpm)
+void dj_set_global_clock(float bar_duration);
+// Align the global clock's phase to a currently playing track
+void dj_align_global_clock(void* sound);
+// Get current global clock bar-phase in seconds
+float dj_get_global_phase(void);
+// Set/get per-track first-beat reference (file-time seconds)
+void dj_set_beat_ref(void* sound, float beat_ref);
+float dj_get_beat_ref(void* sound);
+
+// Scheduled sync playback (syncs to global clock)
 int dj_schedule_sync_play(void* target_sound, float target_seconds,
                           void* source_sound, float source_seconds);
 
-// Immediate synced start: reads source position in real-time,
-// seeks the target to a matching phase or transport position,
-// then starts sample-accurately.
-// preserve_transport: when non-zero, keep the full elapsed offset from source_beat
-// instead of only matching the current bar phase.
+// Immediate synced start (syncs to global clock)
 int dj_sync_start(void* target_sound, float target_beat,
                    void* source_sound, float source_beat, float bar_duration,
                    int preserve_transport);
@@ -64,8 +68,9 @@ int dj_sync_start(void* target_sound, float target_beat,
 // Cancel a previously scheduled start (before it fires)
 int dj_cancel_scheduled_start(void* sound);
 
-// Read phase diff between two sounds in samples (both read in same call, no gap)
-// Returns the bar-phase difference in seconds. 0.0 = perfect sync.
+// Single track phase diff vs global clock (seconds, 0.0 = perfect)
+float dj_get_track_sync_diff(void* sound);
+// Phase diff between two tracks (difference of their global diffs)
 float dj_get_sync_diff(void* sound1, void* sound2, float beat_ref, float bar_duration);
 
 // Time-stretching (Rubber Band — preserves pitch)
@@ -109,6 +114,33 @@ float dj_detect_bpm(const char* filepath);
 // Writes beat positions (in seconds) into out_beats, up to max_beats.
 // Returns the number of beats detected.
 int dj_detect_beats(const char* filepath, float* out_beats, int max_beats);
+
+// Pull processed frames offline (RB + EQ + filter pipeline, no audio device)
+// Returns number of frames actually pulled (may be less than num_frames at end of file)
+int dj_pull_frames(void* sound, float* buffer, int num_frames);
+
+// Detect transients in PCM buffer (LP@200Hz envelope follower)
+// Returns number of transients found, writes times (seconds) into out_times
+int dj_find_transients(const float* pcm, int num_frames, int sample_rate,
+                       float* out_times, int max_transients);
+
+// Get decoded sample rate for a sound
+int dj_get_sample_rate(void* sound);
+
+// Diagnostic / test functions
+unsigned long long dj_get_output_frame_count(void* sound);
+unsigned long long dj_get_read_cursor(void* sound);
+int dj_get_rb_latency(void* sound);
+int dj_get_rb_available(void* sound);
+
+// Zig sync engine — atomic sync orchestration (no RPC latency)
+int dj_zig_version(void);
+void dj_set_beats(void* sound, const float* beats, int count);
+int dj_sync_play(void* target, void* source, float target_anchor_pos);
+void dj_set_master_bpm(float bpm);
+float dj_get_master_bpm(void);
+void dj_register_track(void* sound);
+void dj_unregister_track(void* sound);
 
 #ifdef __cplusplus
 }

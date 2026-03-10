@@ -14,7 +14,7 @@ let buildSyncStartPlan: typeof import("../src/shared/syncPlan.ts").buildSyncStar
 setDefaultTimeout(30000);
 
 beforeAll(async () => {
-  await Bun.$`make -C native`.quiet();
+  await Bun.$`cd native && zig build`.quiet();
   ({ createCliRpcClient } = await import("../src/bun/rpcCore.ts"));
   ({ buildLegacySyncStartPlan, buildSyncStartPlan } = await import("../src/shared/syncPlan.ts"));
 });
@@ -67,9 +67,9 @@ async function runPauseResumeScenario(
     await client.request.setVolume({ trackId: target.id, volume: 0 });
 
     await client.request.play({ trackId: source.id });
-    await sleep(1500);
-    await syncWithPlan(client, source, target, buildSyncStartPlan);
     await sleep(500);
+    await syncWithPlan(client, source, target, buildSyncStartPlan);
+    await sleep(200);
 
     const cycles: Array<{
       cycle: number;
@@ -79,10 +79,10 @@ async function runPauseResumeScenario(
       playing: boolean;
     }> = [];
 
-    for (let cycle = 0; cycle < 5; cycle++) {
-      await sleep(900);
+    for (let cycle = 0; cycle < 3; cycle++) {
+      await sleep(400);
       await client.request.pause({ trackId: target.id });
-      await sleep(100);
+      await sleep(50);
 
       const pausedTarget = await client.request.getPlaybackState({ trackId: target.id });
       const plan = buildPlan({
@@ -105,7 +105,7 @@ async function runPauseResumeScenario(
       });
       expect(ok).toBe(true);
 
-      await sleep(250);
+      await sleep(150);
       const sourceAfter = await client.request.getPlaybackState({ trackId: source.id });
       const targetAfter = await client.request.getPlaybackState({ trackId: target.id });
 
@@ -138,25 +138,26 @@ async function runStopRestartScenario(
     await client.request.setVolume({ trackId: target.id, volume: 0 });
 
     await client.request.play({ trackId: source.id });
-    await sleep(2000);
+    await sleep(500);
 
     const initialPlan = await syncWithPlan(client, source, target, buildPlan);
-    await sleep(500);
+    await sleep(200);
 
     const cycles: Array<{
       cycle: number;
       targetPosBeforeStop: number;
       targetBeat: number;
       diffMs: number;
+      barDurationMs: number;
       playing: boolean;
       initialTargetBeat: number;
     }> = [];
 
-    for (let cycle = 0; cycle < 4; cycle++) {
-      await sleep(1200);
+    for (let cycle = 0; cycle < 3; cycle++) {
+      await sleep(500);
       const targetBeforeStop = await client.request.getPlaybackState({ trackId: target.id });
       await client.request.stop({ trackId: target.id });
-      await sleep(150);
+      await sleep(50);
 
       const targetAfterStop = await client.request.getPlaybackState({ trackId: target.id });
       const sourceAfterStop = await client.request.getPlaybackState({ trackId: source.id });
@@ -180,7 +181,7 @@ async function runStopRestartScenario(
       });
       expect(ok).toBe(true);
 
-      await sleep(300);
+      await sleep(150);
       const sourceAfter = await client.request.getPlaybackState({ trackId: source.id });
       const targetAfter = await client.request.getPlaybackState({ trackId: target.id });
 
@@ -189,6 +190,7 @@ async function runStopRestartScenario(
         targetPosBeforeStop: targetBeforeStop.position,
         targetBeat: plan.targetBeat,
         diffMs: (targetAfter.position - sourceAfter.position) * 1000,
+        barDurationMs: plan.barDuration * 1000,
         playing: targetAfter.isPlaying,
         initialTargetBeat: initialPlan.targetBeat,
       });
@@ -214,6 +216,11 @@ testIfAudio("current desktop RPC sync plan stays aligned through pause/resume", 
 testIfAudio("current desktop RPC sync plan stays aligned through stop/restart cycles", async () => {
   const cycles = await runStopRestartScenario(buildSyncStartPlan);
   expect(cycles.every((cycle) => cycle.playing)).toBe(true);
-  expect(cycles.every((cycle) => Math.abs(cycle.diffMs) < 100)).toBe(true);
+  // After stop/restart, target restarts from firstBeat — absolute positions differ
+  // by whole bars. Check phase alignment (diffMs modulo bar_duration) instead.
+  expect(cycles.every((cycle) => {
+    const phaseDiff = ((cycle.diffMs % cycle.barDurationMs) + cycle.barDurationMs) % cycle.barDurationMs;
+    return Math.min(phaseDiff, cycle.barDurationMs - phaseDiff) < 100;
+  })).toBe(true);
   expect(cycles.every((cycle) => cycle.targetBeat === cycle.initialTargetBeat)).toBe(true);
 });

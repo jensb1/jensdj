@@ -105,14 +105,13 @@ export function startPlaybackTicker(webview: any, intervalMs = 16) {
         ...(eqAutoActive ? (() => { const eq = engine.getEQ(trackId); return { eqLo: eq.lo, eqMid: eq.mid, eqHi: eq.hi, eqAutomationActive: true }; })() : {}),
       });
     }
-    if (Object.keys(positions).length >= 2 && ++logCounter % 60 === 0) {
+    if (Object.keys(positions).length >= 1 && ++logCounter % 60 === 0) {
       const ids = Object.keys(positions);
-      const posStrs = ids.map((id) => `${id}=${positions[id]!.toFixed(4)}s`).join(" ");
-      // Use C-level atomic sync diff measurement (no JS callback gap)
-      const bpm = engine.getOriginalBpm(ids[0]!) || 120;
-      const barDur = 4 * 60 / bpm;
-      const syncDiff = engine.getSyncDiff(ids[0]!, ids[1]!, 0, barDur);
-      console.log(`[SYNC] ${posStrs} diff=${(Math.abs(syncDiff) * 1000).toFixed(1)}ms`);
+      const parts = ids.map((id) => {
+        const diff = engine.getTrackSyncDiff(id);
+        return `${id}=${positions[id]!.toFixed(4)}s(${(Math.abs(diff) * 1000).toFixed(1)}ms)`;
+      });
+      console.log(`[SYNC] ${parts.join(" ")}`);
     }
   }, intervalMs);
 }

@@ -191,6 +191,10 @@ export type MainViewRPC = {
         params: { bpm: number };
         response: void;
       };
+      alignGlobalClock: {
+        params: { trackId: string };
+        response: void;
+      };
       setFilter: {
         params: { trackId: string; value: number };
         response: void;

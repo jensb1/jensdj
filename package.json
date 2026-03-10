@@ -32,7 +32,7 @@
     "start": "bun run build:css && bun run build:dev && electrobun dev",
     "build:css": "(cd src/mainview && bunx @tailwindcss/cli -i index.css -o compiled.css --minify)",
     "build:dev": "bun install && electrobun build",
-    "build:native": "make -C native",
+    "build:native": "cd native && zig build",
     "dev": "bun run build:css && electrobun dev --watch"
   }
 }

@@ -182,6 +182,10 @@ export function createRpcRequestHandlers(audioEngine: AudioEngine, hooks: Reques
       audioEngine.setMasterBpm(bpm);
     },
 
+    alignGlobalClock: ({ trackId }: { trackId: string }) => {
+      audioEngine.alignGlobalClock(trackId);
+    },
+
     setFilter: ({ trackId, value }: { trackId: string; value: number }) => {
       audioEngine.setFilter(trackId, value);
     },
@@ -342,6 +346,19 @@ export function createRpcRequestHandlers(audioEngine: AudioEngine, hooks: Reques
 
     getCollectionTracks: () => {
       return getAllCollectionTracks();
+    },
+
+    getOutputFrameCount: ({ trackId }: { trackId: string }) => {
+      return audioEngine.getOutputFrameCount(trackId);
+    },
+    getReadCursor: ({ trackId }: { trackId: string }) => {
+      return audioEngine.getReadCursor(trackId);
+    },
+    getRbLatency: ({ trackId }: { trackId: string }) => {
+      return audioEngine.getRbLatency(trackId);
+    },
+    getRbAvailable: ({ trackId }: { trackId: string }) => {
+      return audioEngine.getRbAvailable(trackId);
     },
   };
 }
