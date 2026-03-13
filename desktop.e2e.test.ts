@@ -107,6 +107,156 @@ async function waitForSourceNearBar(trackId: string, mode: "before-next" | "afte
   return result!;
 }
 
+async function waitForSourceOffBeat(trackId: string): Promise<{
+  backendPosition: number;
+  previousBeat: number;
+  nextBeat: number;
+  beatPhase: number;
+}> {
+  let result: {
+    backendPosition: number;
+    previousBeat: number;
+    nextBeat: number;
+    beatPhase: number;
+  } | null = null;
+
+  await waitFor(async () => {
+    result = await evaluate<{
+      backendPosition: number;
+      previousBeat: number;
+      nextBeat: number;
+      beatPhase: number;
+    }>(`
+      (async () => {
+        const ctx = await window.__jensdjAutomation.getTrackContext([${JSON.stringify(trackId)}]);
+        const track = ctx[${JSON.stringify(trackId)}];
+        const beats = track.beats;
+        let previousBeat = beats[0] ?? track.firstBeat;
+        let nextBeat = beats[1] ?? (previousBeat + 0.5);
+
+        for (let i = 1; i < beats.length; i++) {
+          const beat = beats[i] ?? previousBeat;
+          if (beat <= track.backendPosition + 0.0001) {
+            previousBeat = beat;
+            continue;
+          }
+          nextBeat = beat;
+          break;
+        }
+
+        if (nextBeat <= previousBeat) {
+          const last = beats[beats.length - 1] ?? previousBeat;
+          const prev = beats[beats.length - 2] ?? (last - 0.5);
+          nextBeat = previousBeat + Math.max(0.0001, last - prev);
+        }
+
+        const span = Math.max(0.0001, nextBeat - previousBeat);
+        const beatPhase = (track.backendPosition - previousBeat) / span;
+
+        return {
+          backendPosition: track.backendPosition,
+          previousBeat,
+          nextBeat,
+          beatPhase,
+        };
+      })()
+    `);
+
+    if (!result) return false;
+    return result.beatPhase > 0.35 && result.beatPhase < 0.65;
+  }, 6000, 20);
+
+  return result!;
+}
+
+async function getZoomedWaveformCorrelation(
+  trackId1: string,
+  trackId2: string,
+): Promise<{ zeroLag: number; bestCorr: number; bestLagPx: number }> {
+  return await evaluate<{ zeroLag: number; bestCorr: number; bestLagPx: number }>(`
+    (() => {
+      const getVector = (trackId) => {
+        const row = document.querySelector(\`[data-testid="track-row-\${trackId}"]\`);
+        if (!(row instanceof HTMLElement)) {
+          throw new Error(\`Missing row for \${trackId}\`);
+        }
+        const canvas = row.querySelectorAll("canvas")[0];
+        if (!(canvas instanceof HTMLCanvasElement)) {
+          throw new Error(\`Missing zoomed waveform canvas for \${trackId}\`);
+        }
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          throw new Error(\`Missing 2d context for \${trackId}\`);
+        }
+
+        const dpr = window.devicePixelRatio || 1;
+        const width = Math.round(canvas.width / dpr);
+        const height = Math.round(canvas.height / dpr);
+        const image = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+        const centerX = Math.round(width / 2);
+        const startX = Math.max(0, centerX - 220);
+        const endX = Math.min(width - 1, centerX + 220);
+        const startY = Math.floor(height * 0.18);
+        const endY = Math.floor(height * 0.92);
+        const vector = [];
+
+        for (let x = startX; x <= endX; x++) {
+          if (Math.abs(x - centerX) <= 2) {
+            vector.push(0);
+            continue;
+          }
+
+          let total = 0;
+          for (let y = startY; y < endY; y++) {
+            const idx = ((Math.floor(y * dpr) * canvas.width) + Math.floor(x * dpr)) * 4;
+            const r = image[idx] ?? 0;
+            const g = image[idx + 1] ?? 0;
+            const b = image[idx + 2] ?? 0;
+            const a = image[idx + 3] ?? 0;
+            total += (r + g + b) * (a / 255);
+          }
+          vector.push(total);
+        }
+
+        const mean = vector.reduce((sum, value) => sum + value, 0) / vector.length;
+        const centered = vector.map((value) => value - mean);
+        const norm = Math.sqrt(centered.reduce((sum, value) => sum + value * value, 0)) || 1;
+        return centered.map((value) => value / norm);
+      };
+
+      const a = getVector(${JSON.stringify(trackId1)});
+      const b = getVector(${JSON.stringify(trackId2)});
+      const correlationAtLag = (lag) => {
+        let sum = 0;
+        let count = 0;
+        for (let i = 0; i < a.length; i++) {
+          const j = i + lag;
+          if (j < 0 || j >= b.length) continue;
+          sum += a[i] * b[j];
+          count += 1;
+        }
+        return count > 0 ? sum / count : -1;
+      };
+
+      let bestLagPx = 0;
+      let bestCorr = -Infinity;
+      for (let lag = -80; lag <= 80; lag++) {
+        const corr = correlationAtLag(lag);
+        if (corr > bestCorr) {
+          bestCorr = corr;
+          bestLagPx = lag;
+        }
+      }
+
+      return {
+        zeroLag: correlationAtLag(0),
+        bestCorr,
+        bestLagPx,
+      };
+    })()
+  `);
+}
+
 beforeAll(async () => {
   if (!RUN_DESKTOP_E2E) return;
 
@@ -216,6 +366,66 @@ testIfDesktop("stopped deck 2 restart stays on its own parked transport", async 
 
   expect(afterTrack2Start.track_2.backendIsPlaying).toBe(true);
   expect(Math.abs(afterTrack2Start.track_1.backendPosition - afterTrack2Start.track_2.backendPosition)).toBeGreaterThan(0.5);
+});
+
+testIfDesktop("fresh sync keeps the rendered zoomed waveform aligned to the audio path", async () => {
+  await evaluate(`
+    (async () => {
+      const snapshot = await window.__jensdjAutomation.getPlaybackSnapshot();
+      for (const [trackId] of Object.entries(snapshot)) {
+        const stop = document.querySelector(\`[data-testid="track-\${trackId}-stop"]\`);
+        if (stop instanceof HTMLElement) stop.click();
+      }
+      await window.__jensdjAutomation.sleep(300);
+      await window.djRpc.request.setMasterBpm({ bpm: 0 });
+      return true;
+    })()
+  `);
+
+  const trackIds = await evaluate<string[]>("window.__jensdjAutomation.getTrackIds()");
+  expect(trackIds.length).toBeGreaterThanOrEqual(2);
+  const t1 = trackIds[0]!;
+  const t2 = trackIds[1]!;
+
+  await evaluate(`
+    window.__jensdjAutomation.removeAllCuesForTrack(${JSON.stringify(t1)});
+    window.__jensdjAutomation.removeAllCuesForTrack(${JSON.stringify(t2)});
+  `);
+
+  const ctx = await evaluate<Record<string, { beats: number[] }>>(`
+    window.__jensdjAutomation.getTrackContext([${JSON.stringify(t1)}, ${JSON.stringify(t2)}])
+  `);
+  const beats1 = ctx[t1]!.beats;
+  expect(beats1.length).toBeGreaterThan(4);
+  const barDuration = (beats1[1]! - beats1[0]!) * 4;
+
+  await evaluate(`window.__jensdjAutomation.clickByTestId("track-${t1}-play")`);
+  const offBeat = await waitForSourceOffBeat(t1);
+  console.log("[WaveformSyncE2E] source off-beat start", offBeat);
+  await evaluate(`window.__jensdjAutomation.clickByTestId("track-${t2}-play")`);
+  await sleep(500);
+
+  const syncDiff = await evaluate<number>(`
+    window.__jensdjAutomation.getSyncDiff(${JSON.stringify(t1)}, ${JSON.stringify(t2)}, 0, ${barDuration})
+  `);
+  const correlation = await getZoomedWaveformCorrelation(t1, t2);
+
+  console.log(`[WaveformSyncE2E] syncDiff=${(syncDiff * 1000).toFixed(3)}ms`);
+  console.log("[WaveformSyncE2E] correlation", correlation);
+
+  expect(Math.abs(syncDiff)).toBeLessThan(0.02);
+  expect(Math.abs(correlation.bestLagPx)).toBeLessThan(8);
+
+  await evaluate(`
+    (async () => {
+      const stop1 = document.querySelector('[data-testid="track-${t1}-stop"]');
+      const stop2 = document.querySelector('[data-testid="track-${t2}-stop"]');
+      if (stop1 instanceof HTMLElement) stop1.click();
+      if (stop2 instanceof HTMLElement) stop2.click();
+      await window.__jensdjAutomation.sleep(300);
+      return true;
+    })()
+  `);
 });
 
 testIfDesktop("bar-aligned track 2 start just before source next bar does not jump a full bar", async () => {

@@ -15,7 +15,7 @@ const rpc = Electroview.defineRPC<MainViewRPC>({
   handlers: {
     requests: {},
     messages: {
-      playbackTick: ({ trackId, position, isPlaying, level, loopStart, loopEnd, filterValue, filterAutomationActive, volumeAutomationActive, eqLo, eqMid, eqHi, eqAutomationActive }) => {
+      playbackTick: ({ trackId, position, isPlaying, level, syncActive, syncPhase, syncBarDuration, loopStart, loopEnd, filterValue, filterAutomationActive, volumeAutomationActive, eqLo, eqMid, eqHi, eqAutomationActive }) => {
         const trackState = usePlayerStore.getState().tracks.get(trackId);
         if (trackState && trackState.isPlaying !== isPlaying) {
           logInfo("playback.stateSync", {
@@ -61,12 +61,15 @@ const rpc = Electroview.defineRPC<MainViewRPC>({
           position: Number(position.toFixed(3)),
           isPlaying,
           level: Number(level.toFixed(3)),
+          syncActive: Boolean(syncActive),
+          syncPhase: syncPhase != null ? Number(syncPhase.toFixed(3)) : null,
+          syncBarDuration: syncBarDuration != null ? Number(syncBarDuration.toFixed(3)) : null,
           loopStart: loopStart != null ? Number(loopStart.toFixed(3)) : null,
           loopEnd: loopEnd != null ? Number(loopEnd.toFixed(3)) : null,
         });
         window.dispatchEvent(
           new CustomEvent("dj:playbackTick", {
-            detail: { trackId, position, isPlaying, level, loopStart, loopEnd },
+            detail: { trackId, position, isPlaying, level, syncActive, syncPhase, syncBarDuration, loopStart, loopEnd },
           })
         );
       },
@@ -125,6 +128,19 @@ declare global {
         backendIsPlaying: boolean;
         firstBeat: number;
         beats: number[];
+      }>>;
+      getTrackWaveformContext: (trackIds?: string[]) => Promise<Record<string, {
+        backendPosition: number;
+        backendIsPlaying: boolean;
+        duration: number;
+        firstBeat: number;
+        bpm: number;
+        beats: number[];
+        peaks: {
+          low: number[];
+          mid: number[];
+          high: number[];
+        };
       }>>;
       sleep: (ms: number) => Promise<boolean>;
       setSelectedTrack: (trackId: string) => void;
@@ -224,6 +240,42 @@ window.__jensdjAutomation = {
         backendIsPlaying: playbackState?.isPlaying ?? false,
         firstBeat: storeTrack.track.beats[0] ?? 0,
         beats: storeTrack.track.beats,
+      };
+    }
+
+    return snapshot;
+  },
+  async getTrackWaveformContext(trackIds?: string[]) {
+    const tracks = usePlayerStore.getState().tracks;
+    const ids = trackIds && trackIds.length > 0 ? trackIds : Array.from(tracks.keys());
+    const snapshot: Record<string, {
+      backendPosition: number;
+      backendIsPlaying: boolean;
+      duration: number;
+      firstBeat: number;
+      bpm: number;
+      beats: number[];
+      peaks: {
+        low: number[];
+        mid: number[];
+        high: number[];
+      };
+    }> = {};
+
+    const states = await window.djRpc?.request?.getPlaybackStates?.({ trackIds: ids }) ?? {};
+
+    for (const trackId of ids) {
+      const storeTrack = tracks.get(trackId);
+      if (!storeTrack) continue;
+      const playbackState = states[trackId];
+      snapshot[trackId] = {
+        backendPosition: playbackState?.position ?? 0,
+        backendIsPlaying: playbackState?.isPlaying ?? false,
+        duration: storeTrack.track.duration,
+        firstBeat: storeTrack.track.beats[0] ?? 0,
+        bpm: storeTrack.track.bpm > 0 ? storeTrack.track.bpm : storeTrack.track.metadata.bpm,
+        beats: storeTrack.track.beats,
+        peaks: storeTrack.track.peaks,
       };
     }
 
