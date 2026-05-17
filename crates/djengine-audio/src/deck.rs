@@ -304,9 +304,10 @@ impl Deck {
             }
             let frame_base = source.floor() as usize;
             let frac = (source - frame_base as f64) as f32;
+            let body_gain = 1.0 - self.transient_body_protection_weight(source).unwrap_or(0.0);
             for ch in 0..channels {
                 self.stretch_input[input_frame * channels + ch] =
-                    sample_interpolated(&self.track, frame_base, frac, ch);
+                    sample_interpolated(&self.track, frame_base, frac, ch) * body_gain;
             }
             filled_input_frames += 1;
         }
@@ -331,7 +332,7 @@ impl Deck {
             let global = global_start.saturating_add(frame as u64);
             let direct_source = self.direct_source_for_global(global);
             let direct_weight = direct_source
-                .and_then(|source| self.transient_lock_weight(source))
+                .and_then(|source| self.direct_attack_weight(source))
                 .unwrap_or(0.0);
             for out_ch in 0..output_channels {
                 let src_ch = out_ch.min(channels - 1);
@@ -424,16 +425,21 @@ impl Deck {
         }
     }
 
-    fn transient_lock_weight(&self, source_frame: f64) -> Option<f32> {
+    fn transient_beat_delta_frames(&self, source_frame: f64) -> Option<f64> {
         if !self.synced_to_master {
-            return Some(0.0);
+            return None;
         }
         let grid = self.track.beat_grid.as_ref()?;
         let sample_rate = f64::from(self.track.sample_rate.max(1));
         let seconds = source_frame / sample_rate;
         let nearest = grid.nearest_beat(seconds)?.round();
         let beat_seconds = grid.time_at_beat(nearest)?;
-        let distance_frames = (source_frame - beat_seconds * sample_rate).abs();
+        Some(source_frame - beat_seconds * sample_rate)
+    }
+
+    fn transient_body_protection_weight(&self, source_frame: f64) -> Option<f32> {
+        let distance_frames = self.transient_beat_delta_frames(source_frame)?.abs();
+        let sample_rate = f64::from(self.track.sample_rate.max(1));
         let full_frames = (TRANSIENT_LOCK_FULL_SECONDS * sample_rate).max(1.0);
         let fade_frames = (TRANSIENT_LOCK_FADE_SECONDS * sample_rate).max(1.0);
         let window_frames = full_frames + fade_frames;
@@ -443,6 +449,26 @@ impl Deck {
             Some(0.0)
         } else {
             let phase = (distance_frames - full_frames) / fade_frames;
+            Some((0.5 + 0.5 * (std::f64::consts::PI * phase).cos()) as f32)
+        }
+    }
+
+    fn direct_attack_weight(&self, source_frame: f64) -> Option<f32> {
+        let delta_frames = self.transient_beat_delta_frames(source_frame)?;
+        if delta_frames < 0.0 {
+            return Some(0.0);
+        }
+
+        let sample_rate = f64::from(self.track.sample_rate.max(1));
+        let full_frames = (TRANSIENT_LOCK_FULL_SECONDS * sample_rate).max(1.0);
+        let fade_frames = (TRANSIENT_LOCK_FADE_SECONDS * sample_rate).max(1.0);
+        let window_frames = full_frames + fade_frames;
+        if delta_frames <= full_frames {
+            Some(1.0)
+        } else if delta_frames >= window_frames {
+            Some(0.0)
+        } else {
+            let phase = (delta_frames - full_frames) / fade_frames;
             Some((0.5 + 0.5 * (std::f64::consts::PI * phase).cos()) as f32)
         }
     }

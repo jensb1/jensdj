@@ -188,6 +188,7 @@ fn assert_rendered_transients_aligned(
     master_bpm: f64,
     beats: usize,
     tolerance_samples: isize,
+    flux_tolerance_samples: isize,
 ) {
     let fluxes = rendered
         .iter()
@@ -255,6 +256,10 @@ fn assert_rendered_transients_aligned(
             peak_spread <= tolerance_samples,
             "{label}: beat {beat} peak-transient spread {peak_spread} samples across {peak_positions:?}; onset-flux positions {flux_positions:?}"
         );
+        assert!(
+            flux_spread <= flux_tolerance_samples,
+            "{label}: beat {beat} onset-flux spread {flux_spread} samples across {flux_positions:?}; peak positions {peak_positions:?}"
+        );
     }
 
     assert!(
@@ -312,6 +317,7 @@ fn transient_analyzer_validates_synced_mp3_loops_across_bpms() {
             master_bpm,
             24,
             48,
+            128,
         );
     }
 }
