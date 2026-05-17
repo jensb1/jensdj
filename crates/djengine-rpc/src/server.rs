@@ -180,6 +180,23 @@ async fn handle_request(
         }),
         "set_master_bpm" | "set_global_master_bpm" => parse::<SetMasterBpmParams>(request.params)
             .and_then(|params| push(command_tx, Command::SetMasterBpm { bpm: params.bpm })),
+        "schedule" | "schedule_quantized" => schedule(request.params, command_tx),
+        "quantized_play" => schedule_alias("play", request.params, command_tx),
+        "quantized_pause" => schedule_alias("pause", request.params, command_tx),
+        "quantized_stop" => schedule_alias("stop", request.params, command_tx),
+        "quantized_seek" | "quantized_seek_beat" => {
+            schedule_alias("seek_beat", request.params, command_tx)
+        }
+        "quantized_jump_beats" => schedule_alias("jump_beats", request.params, command_tx),
+        "quantized_set_loop" | "quantized_set_loop_beats" | "quantized_set_loop_current" => {
+            schedule_alias("set_loop_beats", request.params, command_tx)
+        }
+        "quantized_clear_loop" => schedule_alias("clear_loop", request.params, command_tx),
+        "quantized_set_volume" => schedule_alias("set_volume", request.params, command_tx),
+        "quantized_set_tempo" => schedule_alias("set_tempo", request.params, command_tx),
+        "quantized_set_master_bpm" | "quantized_set_global_master_bpm" => {
+            schedule_alias("set_master_bpm", request.params, command_tx)
+        }
         "ping" => Ok(json!({"pong": true})),
         other => Err(anyhow!("unknown method {other}")),
     };
@@ -236,6 +253,109 @@ async fn load(params: Value, command_tx: &mut rtrb::Producer<Command>) -> anyhow
         bpm: analysis.as_ref().map(|analysis| analysis.bpm),
         beats: analysis.map(|analysis| analysis.beats).unwrap_or_default(),
     })?)
+}
+
+fn schedule(params: Value, command_tx: &mut rtrb::Producer<Command>) -> anyhow::Result<Value> {
+    let params = parse::<ScheduleParams>(params)?;
+    schedule_command(
+        &params.action,
+        params.params,
+        params.quantize,
+        params.offset_beats,
+        command_tx,
+    )
+}
+
+fn schedule_alias(
+    action: &'static str,
+    params: Value,
+    command_tx: &mut rtrb::Producer<Command>,
+) -> anyhow::Result<Value> {
+    let mut params = match params {
+        Value::Object(params) => params,
+        Value::Null => serde_json::Map::new(),
+        _ => return Err(anyhow!("invalid params")),
+    };
+    let quantize = params
+        .remove("quantize")
+        .map(parse)
+        .transpose()?
+        .unwrap_or_default();
+    let offset_beats = params
+        .remove("offset_beats")
+        .map(parse)
+        .transpose()?
+        .unwrap_or(0.0);
+    schedule_command(
+        action,
+        Value::Object(params),
+        quantize,
+        offset_beats,
+        command_tx,
+    )
+}
+
+fn schedule_command(
+    action: &str,
+    params: Value,
+    quantize: djengine_audio::QuantizeMode,
+    offset_beats: f64,
+    command_tx: &mut rtrb::Producer<Command>,
+) -> anyhow::Result<Value> {
+    let command = scheduled_inner_command(action, params)?;
+    push(
+        command_tx,
+        Command::Schedule {
+            quantize,
+            offset_beats,
+            command: Box::new(command),
+        },
+    )
+}
+
+fn scheduled_inner_command(action: &str, params: Value) -> anyhow::Result<Command> {
+    match action {
+        "play" => parse::<DeckParams>(params).map(|params| Command::Play {
+            deck_id: params.deck_id,
+        }),
+        "pause" => parse::<DeckParams>(params).map(|params| Command::Pause {
+            deck_id: params.deck_id,
+        }),
+        "stop" => parse::<DeckParams>(params).map(|params| Command::Stop {
+            deck_id: params.deck_id,
+        }),
+        "seek" | "seek_beat" => parse::<SeekBeatParams>(params).map(|params| Command::SeekBeat {
+            deck_id: params.deck_id,
+            beat: params.beat,
+        }),
+        "jump_beats" => parse::<JumpBeatsParams>(params).map(|params| Command::JumpBeats {
+            deck_id: params.deck_id,
+            beats: params.beats,
+        }),
+        "set_volume" => parse::<SetVolumeParams>(params).map(|params| Command::SetVolume {
+            deck_id: params.deck_id,
+            volume: params.volume,
+        }),
+        "set_tempo" => parse::<SetTempoParams>(params).map(|params| Command::SetTempo {
+            deck_id: params.deck_id,
+            ratio: params.ratio,
+        }),
+        "set_master" => parse::<DeckParams>(params).map(|params| Command::SetMaster {
+            deck_id: params.deck_id,
+        }),
+        "set_loop" | "set_loop_beats" | "set_loop_current" => parse::<SetLoopBeatsParams>(params)
+            .map(|params| Command::SetLoopBeats {
+                deck_id: params.deck_id,
+                start_beat: params.start_beat,
+                length_beats: params.length_beats,
+            }),
+        "clear_loop" => parse::<DeckParams>(params).map(|params| Command::ClearLoop {
+            deck_id: params.deck_id,
+        }),
+        "set_master_bpm" | "set_global_master_bpm" => parse::<SetMasterBpmParams>(params)
+            .map(|params| Command::SetMasterBpm { bpm: params.bpm }),
+        other => Err(anyhow!("unsupported scheduled action {other}")),
+    }
 }
 
 async fn analyze(params: Value) -> anyhow::Result<Value> {
@@ -454,5 +574,40 @@ mod tests {
         assert_eq!(levels[0]["peaks"].as_array().unwrap().len(), 16);
         assert_eq!(levels[1]["points"], 64);
         assert_eq!(levels[1]["peaks"].as_array().unwrap().len(), 64);
+    }
+
+    #[tokio::test]
+    async fn quantized_stop_enqueues_scheduled_stop() {
+        let (mut command_tx, mut command_rx) = rtrb::RingBuffer::<djengine_audio::Command>::new(1);
+        let response = handle_request(
+            RpcRequest {
+                id: Some(json!(2)),
+                method: "quantized_stop".to_string(),
+                params: json!({
+                    "deck_id": 3,
+                    "quantize": "bar",
+                    "offset_beats": 4.0
+                }),
+            },
+            &mut command_tx,
+        )
+        .await;
+
+        assert!(response.error.is_none());
+        let command = command_rx.pop().unwrap();
+        let djengine_audio::Command::Schedule {
+            quantize,
+            offset_beats,
+            command,
+        } = command
+        else {
+            panic!("expected scheduled command");
+        };
+        assert_eq!(quantize, djengine_audio::QuantizeMode::Bar);
+        assert_eq!(offset_beats, 4.0);
+        let djengine_audio::Command::Stop { deck_id } = *command else {
+            panic!("expected scheduled stop");
+        };
+        assert_eq!(deck_id, 3);
     }
 }

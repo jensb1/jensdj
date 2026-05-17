@@ -1,6 +1,16 @@
+use serde::{Deserialize, Serialize};
+
 use crate::deck::DecodedTrack;
 
 pub type DeckId = usize;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuantizeMode {
+    #[default]
+    Beat,
+    Bar,
+}
 
 #[derive(Debug, Clone)]
 pub enum Command {
@@ -69,5 +79,10 @@ pub enum Command {
     },
     SetMasterBpm {
         bpm: Option<f64>,
+    },
+    Schedule {
+        quantize: QuantizeMode,
+        offset_beats: f64,
+        command: Box<Command>,
     },
 }

@@ -41,6 +41,8 @@ Every response contains the original `id` when provided and either `result` or `
 - `set_master_bpm {"bpm":number|null}` sets the global master BPM while preserving current global beat phase; `null` resets it to 120 BPM. Alias: `set_global_master_bpm`.
 - `set_loop_beats {"deck_id":number,"start_beat"?:number,"length_beats":number}` creates a beat-grid loop. Alias: `set_loop`, `set_loop_current`.
 - `clear_loop {"deck_id":number}` disables and clears the loop.
+- `schedule {"quantize":"beat"|"bar","offset_beats"?:number,"action":string,"params":object}` schedules a supported action on the next global-master beat or bar, plus an optional beat offset. Supported actions are `play`, `pause`, `stop`, `seek_beat`, `jump_beats`, `set_loop_beats`, `clear_loop`, `set_volume`, `set_tempo`, `set_master`, and `set_master_bpm`.
+- `quantized_play|quantized_pause|quantized_stop {"deck_id":number,"quantize"?: "beat"|"bar","offset_beats"?:number}` are convenience aliases for scheduled transport commands. Similar aliases exist for `quantized_seek_beat`, `quantized_jump_beats`, `quantized_set_loop_beats`, `quantized_clear_loop`, `quantized_set_volume`, `quantized_set_tempo`, and `quantized_set_master_bpm`.
 - `raw_seek_seconds {"deck_id":number,"seconds":number}` debug/raw escape hatch for source-second seeking.
 - `raw_set_loop_seconds {"deck_id":number,"start_seconds":number,"end_seconds":number,"active"?:bool}` debug/raw escape hatch for source-second loop points.
 

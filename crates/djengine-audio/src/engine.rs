@@ -2,7 +2,7 @@ use djengine_core::beat_grid::next_downbeat_after_beat;
 use djengine_core::{DeckPosition, GlobalClock};
 use rtrb::{Consumer, Producer};
 
-use crate::commands::{Command, DeckId};
+use crate::commands::{Command, DeckId, QuantizeMode};
 use crate::deck::{Deck, DecodedTrack};
 use crate::telemetry::Tick;
 
@@ -39,6 +39,8 @@ pub enum EngineError {
     InvalidMasterBpm,
     #[error("invalid beat command")]
     InvalidBeatCommand,
+    #[error("invalid scheduled command")]
+    InvalidScheduledCommand,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -94,6 +96,13 @@ pub struct Engine {
     command_rx: Option<Consumer<Command>>,
     telemetry_tx: Option<Producer<Tick>>,
     tick_interval_frames: u64,
+    scheduled_commands: Vec<ScheduledCommand>,
+}
+
+#[derive(Debug, Clone)]
+struct ScheduledCommand {
+    target_global_frame: u64,
+    command: Command,
 }
 
 impl Engine {
@@ -109,6 +118,7 @@ impl Engine {
             command_rx: None,
             telemetry_tx: None,
             tick_interval_frames,
+            scheduled_commands: Vec::with_capacity(128),
         }
     }
 
@@ -475,6 +485,11 @@ impl Engine {
                 Ok(())
             }
             Command::SetMasterBpm { bpm } => self.set_master_bpm(bpm),
+            Command::Schedule {
+                quantize,
+                offset_beats,
+                command,
+            } => self.schedule_command(quantize, offset_beats, *command),
         }
     }
 
@@ -490,14 +505,25 @@ impl Engine {
 
         let channels = self.config.output_channels.max(1);
         let frames = output.len() / channels;
-        let global_start = self.clock.load();
+        let mut rendered = 0usize;
+        while rendered < frames {
+            let global_start = self.clock.load();
+            self.apply_due_scheduled(global_start);
+            let remaining = frames - rendered;
+            let chunk_frames = self.frames_until_next_scheduled(global_start, remaining);
+            let start = rendered * channels;
+            let end = start + chunk_frames * channels;
 
-        for deck in self.decks.iter_mut().flatten() {
-            deck.render_add(global_start, channels, output);
+            for deck in self.decks.iter_mut().flatten() {
+                deck.render_add(global_start, channels, &mut output[start..end]);
+            }
+
+            self.emit_ticks(global_start);
+            self.clock.advance(chunk_frames as u64);
+            rendered += chunk_frames;
         }
 
-        self.emit_ticks(global_start);
-        self.clock.advance(frames as u64);
+        self.apply_due_scheduled(self.clock.load());
     }
 
     pub fn phase_difference_samples(&self, deck_id: DeckId, global_frame: u64) -> Option<i64> {
@@ -552,6 +578,86 @@ impl Engine {
             * f64::from(self.config.device_sample_rate)
             / self.global_master.bpm();
         current_global_frame.saturating_add(frames_until.round() as u64)
+    }
+
+    fn schedule_command(
+        &mut self,
+        quantize: QuantizeMode,
+        offset_beats: f64,
+        command: Command,
+    ) -> Result<(), EngineError> {
+        if !offset_beats.is_finite() || offset_beats < 0.0 {
+            return Err(EngineError::InvalidScheduledCommand);
+        }
+        if matches!(command, Command::Load { .. } | Command::Schedule { .. }) {
+            return Err(EngineError::InvalidScheduledCommand);
+        }
+
+        let target_global_frame = self.next_global_frame_for_quantize(quantize, offset_beats)?;
+        self.scheduled_commands.push(ScheduledCommand {
+            target_global_frame,
+            command,
+        });
+        Ok(())
+    }
+
+    fn next_global_frame_for_quantize(
+        &self,
+        quantize: QuantizeMode,
+        offset_beats: f64,
+    ) -> Result<u64, EngineError> {
+        let current_global_frame = self.clock.load();
+        let current_beat = self
+            .global_master
+            .beat_at(current_global_frame, self.config.device_sample_rate);
+        if !current_beat.is_finite() || self.global_master.bpm() <= 0.0 {
+            return Err(EngineError::InvalidScheduledCommand);
+        }
+
+        let boundary_beat = match quantize {
+            QuantizeMode::Beat => current_beat.floor() + 1.0,
+            QuantizeMode::Bar => {
+                next_downbeat_after_beat(current_beat, self.global_master.beats_per_bar)
+            }
+        };
+        let target_beat = boundary_beat + offset_beats;
+        let frames_until = (target_beat - current_beat).max(0.0)
+            * 60.0
+            * f64::from(self.config.device_sample_rate)
+            / self.global_master.bpm();
+        if !frames_until.is_finite() {
+            return Err(EngineError::InvalidScheduledCommand);
+        }
+        Ok(current_global_frame.saturating_add(frames_until.round() as u64))
+    }
+
+    fn frames_until_next_scheduled(&self, global_start: u64, remaining_frames: usize) -> usize {
+        let Some(next) = self
+            .scheduled_commands
+            .iter()
+            .filter_map(|scheduled| {
+                (scheduled.target_global_frame > global_start)
+                    .then_some(scheduled.target_global_frame)
+            })
+            .min()
+        else {
+            return remaining_frames;
+        };
+
+        let frames = next.saturating_sub(global_start) as usize;
+        frames.clamp(1, remaining_frames)
+    }
+
+    fn apply_due_scheduled(&mut self, global_frame: u64) {
+        let mut index = 0usize;
+        while index < self.scheduled_commands.len() {
+            if self.scheduled_commands[index].target_global_frame <= global_frame {
+                let scheduled = self.scheduled_commands.remove(index);
+                let _ = self.handle_command(scheduled.command);
+            } else {
+                index += 1;
+            }
+        }
     }
 
     fn drain_commands(&mut self) {
@@ -694,6 +800,7 @@ mod tests {
     use djengine_core::BeatGrid;
 
     use super::{Engine, EngineConfig};
+    use crate::commands::QuantizeMode;
     use crate::deck::DecodedTrack;
 
     fn click_track(bpm: f64, seconds: f64) -> DecodedTrack {
@@ -721,6 +828,22 @@ mod tests {
         }
     }
 
+    fn constant_track(seconds: f64) -> DecodedTrack {
+        let sample_rate = 48_000;
+        let frames = (seconds * f64::from(sample_rate)) as usize;
+        DecodedTrack {
+            sample_rate,
+            channels: 2,
+            samples: Arc::new(vec![0.5; frames * 2]),
+            beat_grid: Some(BeatGrid::new(
+                (0..(seconds * 2.0) as usize)
+                    .map(|beat| beat as f32 * 0.5)
+                    .collect(),
+            )),
+            original_bpm: Some(120.0),
+        }
+    }
+
     #[test]
     fn offline_engine_advances_clock() {
         let mut engine = Engine::new(EngineConfig::default());
@@ -732,5 +855,34 @@ mod tests {
         engine.process_offline(512, &mut out);
         assert_eq!(engine.current_global_frame(), 512);
         assert!(out.iter().any(|sample| *sample != 0.0));
+    }
+
+    #[test]
+    fn scheduled_stop_applies_on_exact_quantized_frame() {
+        let mut engine = Engine::new(EngineConfig::default());
+        let deck = engine.load_track(constant_track(2.0)).unwrap();
+        engine
+            .handle_command(crate::Command::Play { deck_id: deck })
+            .unwrap();
+        engine
+            .handle_command(crate::Command::Schedule {
+                quantize: QuantizeMode::Beat,
+                offset_beats: 0.0,
+                command: Box::new(crate::Command::Stop { deck_id: deck }),
+            })
+            .unwrap();
+
+        let mut out = vec![0.0; 48_000 * 2];
+        engine.process_offline(48_000, &mut out);
+
+        let stop_frame = 24_000;
+        assert!(out[..stop_frame * 2]
+            .iter()
+            .all(|sample| (*sample - 0.5).abs() < 1.0e-6));
+        assert!(out[stop_frame * 2..]
+            .iter()
+            .all(|sample| sample.abs() < 1.0e-6));
+        assert!(!engine.deck(deck).unwrap().playing);
+        assert_eq!(engine.current_global_frame(), 48_000);
     }
 }

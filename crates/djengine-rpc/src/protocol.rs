@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use djengine_audio::DeckId;
+use djengine_audio::{DeckId, QuantizeMode};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RpcRequest {
@@ -103,6 +103,17 @@ pub struct SetLoopBeatsParams {
     pub start_beat: Option<f64>,
     #[serde(alias = "beats")]
     pub length_beats: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ScheduleParams {
+    pub action: String,
+    #[serde(default)]
+    pub params: Value,
+    #[serde(default)]
+    pub quantize: QuantizeMode,
+    #[serde(default)]
+    pub offset_beats: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
