@@ -10,7 +10,7 @@ const OUTPUT_CHANNELS: usize = 2;
 
 fn fixture_path(name: &str) -> PathBuf {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../jensdjold/test-assets")
+        .join("test-assets")
         .join(name);
     assert!(path.exists(), "missing MP3 fixture at {}", path.display());
     path
