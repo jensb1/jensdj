@@ -156,6 +156,116 @@ fn strongest_peak_near(samples: &[f32], center: usize, radius: usize) -> (usize,
     (index, samples[index].abs())
 }
 
+fn transient_flux(samples: &[f32], window: usize) -> Vec<f32> {
+    let window = window.max(1);
+    let mut prefix = Vec::with_capacity(samples.len() + 1);
+    prefix.push(0.0f32);
+    for &sample in samples {
+        prefix.push(prefix.last().copied().unwrap_or(0.0) + sample * sample);
+    }
+
+    let mut flux = vec![0.0; samples.len()];
+    for index in window * 2..samples.len() {
+        let current = prefix[index + 1] - prefix[index + 1 - window];
+        let previous = prefix[index + 1 - window] - prefix[index + 1 - window * 2];
+        flux[index] = (current - previous).max(0.0);
+    }
+    flux
+}
+
+fn strongest_transient_near(flux: &[f32], center: usize, radius: usize) -> (usize, f32) {
+    let start = center.saturating_sub(radius);
+    let end = center.saturating_add(radius).min(flux.len());
+    let index = (start..end)
+        .max_by(|&a, &b| flux[a].total_cmp(&flux[b]))
+        .unwrap_or(center);
+    (index, flux[index])
+}
+
+fn assert_rendered_transients_aligned(
+    label: &str,
+    rendered: &[(&str, Vec<f32>)],
+    master_bpm: f64,
+    beats: usize,
+    tolerance_samples: isize,
+) {
+    let fluxes = rendered
+        .iter()
+        .map(|(name, samples)| (*name, transient_flux(samples, 96)))
+        .collect::<Vec<_>>();
+    let beat_frames = (f64::from(DEVICE_SAMPLE_RATE) * 60.0 / master_bpm).round() as usize;
+    let search_radius = (f64::from(DEVICE_SAMPLE_RATE) * 0.08).round() as usize;
+    let mut max_peak_spread = 0isize;
+    let mut max_flux_spread = 0isize;
+    let mut checked = 0usize;
+
+    for beat in 1..=beats {
+        let center = (4 + beat) * beat_frames;
+        if rendered
+            .iter()
+            .any(|(_, samples)| center + search_radius >= samples.len())
+        {
+            break;
+        }
+
+        let mut peak_positions = Vec::with_capacity(rendered.len());
+        for (name, samples) in rendered {
+            let (peak, level) = strongest_peak_near(samples, center, search_radius);
+            assert!(
+                level > 0.1,
+                "{label}: {name} beat {beat} missing transient peak {level}"
+            );
+            peak_positions.push((*name, peak as isize));
+        }
+
+        let mut flux_positions = Vec::with_capacity(fluxes.len());
+        for (name, flux) in &fluxes {
+            let (peak, _strength) = strongest_transient_near(flux, center, search_radius);
+            flux_positions.push((*name, peak as isize));
+        }
+
+        let min_peak = peak_positions
+            .iter()
+            .map(|(_, peak)| *peak)
+            .min()
+            .unwrap_or(0);
+        let max_peak = peak_positions
+            .iter()
+            .map(|(_, peak)| *peak)
+            .max()
+            .unwrap_or(0);
+        let peak_spread = max_peak - min_peak;
+        max_peak_spread = max_peak_spread.max(peak_spread);
+
+        let min_flux = flux_positions
+            .iter()
+            .map(|(_, peak)| *peak)
+            .min()
+            .unwrap_or(0);
+        let max_flux = flux_positions
+            .iter()
+            .map(|(_, peak)| *peak)
+            .max()
+            .unwrap_or(0);
+        let flux_spread = max_flux - min_flux;
+        max_flux_spread = max_flux_spread.max(flux_spread);
+        checked += 1;
+
+        assert!(
+            peak_spread <= tolerance_samples,
+            "{label}: beat {beat} peak-transient spread {peak_spread} samples across {peak_positions:?}; onset-flux positions {flux_positions:?}"
+        );
+    }
+
+    assert!(
+        checked >= beats / 2,
+        "{label}: checked only {checked} beats"
+    );
+    eprintln!(
+        "{label}: checked {checked} beats, max peak spread {max_peak_spread} samples, max onset-flux spread {max_flux_spread} samples"
+    );
+}
+
 fn max_abs_and_step(samples: &[f32]) -> (f32, f32, usize) {
     let mut max_abs = 0.0f32;
     let mut max_step = 0.0f32;
@@ -173,6 +283,37 @@ fn max_abs_and_step(samples: &[f32]) -> (f32, f32, usize) {
     }
 
     (max_abs, max_step, max_step_index)
+}
+
+#[test]
+fn transient_analyzer_validates_synced_mp3_loops_across_bpms() {
+    for master_bpm in [80.0, 100.0, 120.0, 130.0] {
+        let rendered = [
+            ("beat100.mp3", 100.0),
+            ("beat120.mp3", 120.0),
+            ("beat125.mp3", 125.0),
+        ]
+        .into_iter()
+        .map(|(name, source_bpm)| {
+            (
+                name,
+                render_synced_track_at_bpm(
+                    analyzed_track(name, source_bpm),
+                    master_bpm,
+                    Some(8.0),
+                    24.0,
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+        assert_rendered_transients_aligned(
+            &format!("mp3 fixtures @ {master_bpm} BPM"),
+            &rendered,
+            master_bpm,
+            24,
+            48,
+        );
+    }
 }
 
 #[test]
