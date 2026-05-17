@@ -6,7 +6,7 @@ use std::thread;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context};
-use djengine_analysis::{decode_file, extract_beats, extract_peaks};
+use djengine_analysis::{decode_file, extract_beats_with_bpm_hint, extract_peaks, read_bpm_tag};
 use djengine_audio::backend::{Backend, CpalBackend};
 use djengine_audio::{Command, DecodedTrack, Engine, EngineConfig, Tick};
 use djengine_core::BeatGrid;
@@ -193,13 +193,21 @@ async fn handle_request(
 async fn load(params: Value, command_tx: &mut rtrb::Producer<Command>) -> anyhow::Result<Value> {
     let params = parse::<LoadParams>(params)?;
     let path = params.path.clone();
-    let decoded = tokio::task::spawn_blocking(move || decode_file(Path::new(&path)))
-        .await
-        .context("load task failed")??;
+    let decoded = tokio::task::spawn_blocking({
+        let path = path.clone();
+        move || decode_file(Path::new(&path))
+    })
+    .await
+    .context("load task failed")??;
+    let bpm_hint = read_bpm_tag(&path).ok().flatten();
 
     let mono = to_mono(&decoded.samples, decoded.channels);
     let analysis = if params.analyze {
-        Some(extract_beats(&mono, decoded.sample_rate))
+        Some(extract_beats_with_bpm_hint(
+            &mono,
+            decoded.sample_rate,
+            bpm_hint,
+        ))
     } else {
         None
     };
@@ -233,9 +241,10 @@ async fn load(params: Value, command_tx: &mut rtrb::Producer<Command>) -> anyhow
 async fn analyze(params: Value) -> anyhow::Result<Value> {
     let params = parse::<AnalyzeParams>(params)?;
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<AnalysisResult> {
+        let bpm_hint = read_bpm_tag(&params.path).ok().flatten();
         let decoded = decode_file(&params.path)?;
         let mono = to_mono(&decoded.samples, decoded.channels);
-        let beats = extract_beats(&mono, decoded.sample_rate);
+        let beats = extract_beats_with_bpm_hint(&mono, decoded.sample_rate, bpm_hint);
         let peaks = extract_peaks(&decoded.samples, decoded.channels, params.peak_points);
         let waveform_levels = waveform_levels(
             &decoded.samples,

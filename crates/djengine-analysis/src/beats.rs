@@ -1,4 +1,4 @@
-use crate::bpm::{detect_transient_indices, estimate_bpm_from_mono};
+use crate::bpm::{estimate_beat_grid_from_mono, estimate_beat_grid_from_mono_with_hint};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BeatAnalysis {
@@ -7,11 +7,19 @@ pub struct BeatAnalysis {
 }
 
 pub fn extract_beats(samples: &[f32], sample_rate: u32) -> BeatAnalysis {
-    let bpm = estimate_bpm_from_mono(samples, sample_rate).unwrap_or(0.0);
-    let beats = detect_transient_indices(samples, sample_rate)
-        .into_iter()
-        .map(|sample_index| sample_index as f32 / sample_rate as f32)
-        .collect();
+    let (bpm, beats) =
+        estimate_beat_grid_from_mono(samples, sample_rate).unwrap_or_else(|| (0.0, Vec::new()));
+
+    BeatAnalysis { bpm, beats }
+}
+
+pub fn extract_beats_with_bpm_hint(
+    samples: &[f32],
+    sample_rate: u32,
+    bpm_hint: Option<f32>,
+) -> BeatAnalysis {
+    let (bpm, beats) = estimate_beat_grid_from_mono_with_hint(samples, sample_rate, bpm_hint)
+        .unwrap_or_else(|| (0.0, Vec::new()));
 
     BeatAnalysis { bpm, beats }
 }
@@ -57,6 +65,27 @@ mod tests {
 
         assert_eq!(analysis.bpm, 0.0);
         assert!(analysis.beats.is_empty());
+    }
+
+    #[test]
+    fn regular_subdivisions_produce_normalized_beat_grid() {
+        let samples = click_track(240.0, 8.0);
+        let analysis = extract_beats(&samples, SAMPLE_RATE);
+
+        assert!(
+            (analysis.bpm - 120.0).abs() < 0.25,
+            "expected normalized 120 BPM, got {}",
+            analysis.bpm
+        );
+
+        for interval in analysis
+            .beats
+            .windows(2)
+            .take(8)
+            .map(|pair| pair[1] - pair[0])
+        {
+            assert!((interval - 0.5).abs() < 0.002, "got {interval}");
+        }
     }
 
     fn click_track(bpm: f32, seconds: f32) -> Vec<f32> {
