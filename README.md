@@ -43,8 +43,18 @@ Every response contains the original `id` when provided and either `result` or `
 - `clear_loop {"deck_id":number}` disables and clears the loop.
 - `schedule {"quantize":"beat"|"bar","offset_beats"?:number,"action":string,"params":object}` schedules a supported action on the next global-master beat or bar, plus an optional beat offset. Supported actions are `play`, `pause`, `stop`, `seek_beat`, `jump_beats`, `set_loop_beats`, `clear_loop`, `set_volume`, `set_tempo`, `set_master`, and `set_master_bpm`.
 - `quantized_play|quantized_pause|quantized_stop {"deck_id":number,"quantize"?: "beat"|"bar","offset_beats"?:number}` are convenience aliases for scheduled transport commands. Similar aliases exist for `quantized_seek_beat`, `quantized_jump_beats`, `quantized_set_loop_beats`, `quantized_clear_loop`, `quantized_set_volume`, `quantized_set_tempo`, and `quantized_set_master_bpm`.
+- `subscribe {"events":string[]}` enables JSON notifications for event groups: `deck`, `transport`, `scheduler`, `loop`, `sync`, `master`, or `all`. Notifications are emitted as `{"method":"event","params":{...}}`.
+- `unsubscribe {"events"?:string[]}` disables event groups; omitting `events` disables all discrete event groups.
+- `subscribe_clock {"interval_beats"?:number,"subdivisions_per_beat"?:number}` emits `clock_tick` events at exact global-master beat intervals. `{"interval_beats":8}` emits every 8 beats; `{"subdivisions_per_beat":8}` emits eight ticks per beat. The response includes `subscription_id`.
+- `unsubscribe_clock {"subscription_id":number}` disables a clock subscription.
 - `raw_seek_seconds {"deck_id":number,"seconds":number}` debug/raw escape hatch for source-second seeking.
 - `raw_set_loop_seconds {"deck_id":number,"start_seconds":number,"end_seconds":number,"active"?:bool}` debug/raw escape hatch for source-second loop points.
+
+Example event notification:
+
+```json
+{"method":"event","params":{"type":"clock_tick","subscription_id":1,"global_frame":384000,"time_seconds":8.0,"global_master_beat":16.0,"global_master_bar":4.0,"tick_index":31}}
+```
 
 ## Frontend Waveforms
 

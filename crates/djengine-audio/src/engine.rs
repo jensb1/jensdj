@@ -4,7 +4,7 @@ use rtrb::{Consumer, Producer};
 
 use crate::commands::{Command, DeckId, QuantizeMode};
 use crate::deck::{Deck, DecodedTrack};
-use crate::telemetry::Tick;
+use crate::telemetry::{CommandAction, EngineEvent, Tick};
 
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
@@ -41,6 +41,8 @@ pub enum EngineError {
     InvalidBeatCommand,
     #[error("invalid scheduled command")]
     InvalidScheduledCommand,
+    #[error("invalid clock subscription")]
+    InvalidClockSubscription,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -71,6 +73,12 @@ impl GlobalMaster {
                 / (60.0 * f64::from(device_sample_rate.max(1)))
     }
 
+    pub fn frame_at_beat(&self, beat: f64, device_sample_rate: u32) -> u64 {
+        let frame = self.anchor_global_frame as f64
+            + (beat - self.anchor_beat) * 60.0 * f64::from(device_sample_rate.max(1)) / self.bpm;
+        frame.round().max(0.0) as u64
+    }
+
     pub fn set_bpm_preserving_phase(
         &mut self,
         bpm: f64,
@@ -95,14 +103,27 @@ pub struct Engine {
     global_master: GlobalMaster,
     command_rx: Option<Consumer<Command>>,
     telemetry_tx: Option<Producer<Tick>>,
+    event_tx: Option<Producer<EngineEvent>>,
     tick_interval_frames: u64,
     scheduled_commands: Vec<ScheduledCommand>,
+    clock_subscriptions: Vec<ClockSubscription>,
+    next_schedule_id: u64,
 }
 
 #[derive(Debug, Clone)]
 struct ScheduledCommand {
+    schedule_id: u64,
     target_global_frame: u64,
+    action: CommandAction,
     command: Command,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ClockSubscription {
+    subscription_id: u64,
+    interval_beats: f64,
+    next_beat: f64,
+    tick_index: u64,
 }
 
 impl Engine {
@@ -117,8 +138,11 @@ impl Engine {
             global_master: GlobalMaster::new(120.0),
             command_rx: None,
             telemetry_tx: None,
+            event_tx: None,
             tick_interval_frames,
             scheduled_commands: Vec::with_capacity(128),
+            clock_subscriptions: Vec::with_capacity(16),
+            next_schedule_id: 1,
         }
     }
 
@@ -126,10 +150,12 @@ impl Engine {
         config: EngineConfig,
         command_rx: Consumer<Command>,
         telemetry_tx: Producer<Tick>,
+        event_tx: Producer<EngineEvent>,
     ) -> Self {
         let mut engine = Self::new(config);
         engine.command_rx = Some(command_rx);
         engine.telemetry_tx = Some(telemetry_tx);
+        engine.event_tx = Some(event_tx);
         engine
     }
 
@@ -413,24 +439,50 @@ impl Engine {
     pub fn handle_command(&mut self, command: Command) -> Result<(), EngineError> {
         let current = self.clock.load();
         match command {
-            Command::Load { deck_id, track } => self.load_track_at(deck_id, track),
-            Command::Unload { deck_id } => self.unload(deck_id),
+            Command::Load { deck_id, track } => {
+                self.load_track_at(deck_id, track)?;
+                self.emit_event(EngineEvent::DeckLoaded {
+                    deck_id: deck_id as u32,
+                    global_frame: current,
+                });
+                Ok(())
+            }
+            Command::Unload { deck_id } => {
+                self.unload(deck_id)?;
+                self.emit_event(EngineEvent::DeckUnloaded {
+                    deck_id: deck_id as u32,
+                    global_frame: current,
+                });
+                Ok(())
+            }
             Command::Play { deck_id } => {
                 self.deck_mut(deck_id)
                     .ok_or(EngineError::EmptyDeck(deck_id))?
                     .play(current);
+                self.emit_event(EngineEvent::TransportStarted {
+                    deck_id: deck_id as u32,
+                    global_frame: current,
+                });
                 Ok(())
             }
             Command::Pause { deck_id } => {
                 self.deck_mut(deck_id)
                     .ok_or(EngineError::EmptyDeck(deck_id))?
                     .pause(current);
+                self.emit_event(EngineEvent::TransportPaused {
+                    deck_id: deck_id as u32,
+                    global_frame: current,
+                });
                 Ok(())
             }
             Command::Stop { deck_id } => {
                 self.deck_mut(deck_id)
                     .ok_or(EngineError::EmptyDeck(deck_id))?
                     .stop(current);
+                self.emit_event(EngineEvent::TransportStopped {
+                    deck_id: deck_id as u32,
+                    global_frame: current,
+                });
                 Ok(())
             }
             Command::SeekBeat { deck_id, beat } => self.seek_beat(deck_id, beat),
@@ -459,9 +511,32 @@ impl Engine {
                     .set_original_bpm(bpm);
                 Ok(())
             }
-            Command::SetMaster { deck_id } => self.set_master(deck_id),
-            Command::EngageSync { deck_id } => self.engage_sync(deck_id),
-            Command::DisengageSync { deck_id } => self.disengage_sync(deck_id),
+            Command::SetMaster { deck_id } => {
+                self.set_master(deck_id)?;
+                self.emit_event(EngineEvent::MasterBpmChanged {
+                    global_frame: current,
+                    bpm: self.global_master.bpm(),
+                });
+                Ok(())
+            }
+            Command::EngageSync { deck_id } => {
+                self.engage_sync(deck_id)?;
+                self.emit_event(EngineEvent::SyncChanged {
+                    deck_id: deck_id as u32,
+                    global_frame: current,
+                    synced: true,
+                });
+                Ok(())
+            }
+            Command::DisengageSync { deck_id } => {
+                self.disengage_sync(deck_id)?;
+                self.emit_event(EngineEvent::SyncChanged {
+                    deck_id: deck_id as u32,
+                    global_frame: current,
+                    synced: false,
+                });
+                Ok(())
+            }
             Command::RawSetLoopSeconds {
                 deck_id,
                 start_seconds,
@@ -471,25 +546,50 @@ impl Engine {
                 self.deck_mut(deck_id)
                     .ok_or(EngineError::EmptyDeck(deck_id))?
                     .set_loop(start_seconds, end_seconds, active);
+                self.emit_loop_event(deck_id, current);
                 Ok(())
             }
             Command::SetLoopBeats {
                 deck_id,
                 start_beat,
                 length_beats,
-            } => self.set_loop_beats(deck_id, start_beat, length_beats),
+            } => {
+                self.set_loop_beats(deck_id, start_beat, length_beats)?;
+                self.emit_loop_event(deck_id, current);
+                Ok(())
+            }
             Command::ClearLoop { deck_id } => {
                 self.deck_mut(deck_id)
                     .ok_or(EngineError::EmptyDeck(deck_id))?
                     .clear_loop();
+                self.emit_event(EngineEvent::LoopCleared {
+                    deck_id: deck_id as u32,
+                    global_frame: current,
+                });
                 Ok(())
             }
-            Command::SetMasterBpm { bpm } => self.set_master_bpm(bpm),
+            Command::SetMasterBpm { bpm } => {
+                self.set_master_bpm(bpm)?;
+                self.emit_event(EngineEvent::MasterBpmChanged {
+                    global_frame: current,
+                    bpm: self.global_master.bpm(),
+                });
+                Ok(())
+            }
             Command::Schedule {
                 quantize,
                 offset_beats,
                 command,
             } => self.schedule_command(quantize, offset_beats, *command),
+            Command::SetClockSubscription {
+                subscription_id,
+                interval_beats,
+            } => self.set_clock_subscription(subscription_id, interval_beats),
+            Command::ClearClockSubscription { subscription_id } => {
+                self.clock_subscriptions
+                    .retain(|subscription| subscription.subscription_id != subscription_id);
+                Ok(())
+            }
         }
     }
 
@@ -518,6 +618,10 @@ impl Engine {
                 deck.render_add(global_start, channels, &mut output[start..end]);
             }
 
+            self.emit_clock_events(
+                global_start,
+                global_start.saturating_add(chunk_frames as u64),
+            );
             self.emit_ticks(global_start);
             self.clock.advance(chunk_frames as u64);
             rendered += chunk_frames;
@@ -594,9 +698,23 @@ impl Engine {
         }
 
         let target_global_frame = self.next_global_frame_for_quantize(quantize, offset_beats)?;
+        let schedule_id = self.next_schedule_id;
+        self.next_schedule_id = self.next_schedule_id.saturating_add(1);
+        let action = command_action(&command).ok_or(EngineError::InvalidScheduledCommand)?;
+        let target_global_master_beat = self
+            .global_master
+            .beat_at(target_global_frame, self.config.device_sample_rate);
         self.scheduled_commands.push(ScheduledCommand {
+            schedule_id,
             target_global_frame,
+            action,
             command,
+        });
+        self.emit_event(EngineEvent::ScheduledArmed {
+            schedule_id,
+            action,
+            target_global_frame,
+            target_global_master_beat,
         });
         Ok(())
     }
@@ -653,11 +771,122 @@ impl Engine {
         while index < self.scheduled_commands.len() {
             if self.scheduled_commands[index].target_global_frame <= global_frame {
                 let scheduled = self.scheduled_commands.remove(index);
+                let schedule_id = scheduled.schedule_id;
+                let action = scheduled.action;
                 let _ = self.handle_command(scheduled.command);
+                self.emit_event(EngineEvent::ScheduledFired {
+                    schedule_id,
+                    action,
+                    global_frame,
+                    global_master_beat: self
+                        .global_master
+                        .beat_at(global_frame, self.config.device_sample_rate),
+                });
             } else {
                 index += 1;
             }
         }
+    }
+
+    fn set_clock_subscription(
+        &mut self,
+        subscription_id: u64,
+        interval_beats: f64,
+    ) -> Result<(), EngineError> {
+        if subscription_id == 0 || !interval_beats.is_finite() || interval_beats <= 0.0 {
+            return Err(EngineError::InvalidClockSubscription);
+        }
+        let current_beat = self
+            .global_master
+            .beat_at(self.clock.load(), self.config.device_sample_rate);
+        let next_beat = ((current_beat / interval_beats).floor() + 1.0) * interval_beats;
+        let subscription = ClockSubscription {
+            subscription_id,
+            interval_beats,
+            next_beat,
+            tick_index: 0,
+        };
+        if let Some(existing) = self
+            .clock_subscriptions
+            .iter_mut()
+            .find(|existing| existing.subscription_id == subscription_id)
+        {
+            *existing = subscription;
+        } else {
+            self.clock_subscriptions.push(subscription);
+        }
+        Ok(())
+    }
+
+    fn emit_clock_events(&mut self, global_start: u64, global_end: u64) {
+        for index in 0..self.clock_subscriptions.len() {
+            loop {
+                let event = {
+                    let subscription = &mut self.clock_subscriptions[index];
+                    let event_frame = self
+                        .global_master
+                        .frame_at_beat(subscription.next_beat, self.config.device_sample_rate);
+                    if event_frame < global_start || event_frame >= global_end {
+                        None
+                    } else {
+                        let global_master_beat = subscription.next_beat;
+                        let event = EngineEvent::ClockTick {
+                            subscription_id: subscription.subscription_id,
+                            global_frame: event_frame,
+                            time_seconds: event_frame as f64
+                                / f64::from(self.config.device_sample_rate.max(1)),
+                            global_master_beat,
+                            global_master_bar: global_master_beat
+                                / f64::from(self.global_master.beats_per_bar.max(1)),
+                            tick_index: subscription.tick_index,
+                        };
+                        subscription.next_beat += subscription.interval_beats;
+                        subscription.tick_index = subscription.tick_index.saturating_add(1);
+                        Some(event)
+                    }
+                };
+
+                let Some(event) = event else {
+                    break;
+                };
+                self.emit_event(event);
+            }
+        }
+    }
+
+    fn emit_loop_event(&mut self, deck_id: DeckId, global_frame: u64) {
+        let Some(deck) = self.deck(deck_id) else {
+            return;
+        };
+        if !deck.loop_state.active {
+            self.emit_event(EngineEvent::LoopCleared {
+                deck_id: deck_id as u32,
+                global_frame,
+            });
+            return;
+        }
+        let Some(grid) = deck.track.beat_grid.as_ref() else {
+            return;
+        };
+        let Some(start_beat) = grid.beat_at_time(deck.loop_state.start_seconds) else {
+            return;
+        };
+        let Some(end_beat) = grid.beat_at_time(deck.loop_state.end_seconds) else {
+            return;
+        };
+        self.emit_event(EngineEvent::LoopChanged {
+            deck_id: deck_id as u32,
+            global_frame,
+            start_beat,
+            length_beats: end_beat - start_beat,
+        });
+    }
+
+    fn emit_event(&mut self, event: EngineEvent) {
+        let Some(tx) = self.event_tx.as_mut() else {
+            return;
+        };
+        let _ = tx.push(event);
     }
 
     fn drain_commands(&mut self) {
@@ -793,6 +1022,32 @@ impl Engine {
     }
 }
 
+fn command_action(command: &Command) -> Option<CommandAction> {
+    match command {
+        Command::Play { .. } => Some(CommandAction::Play),
+        Command::Pause { .. } => Some(CommandAction::Pause),
+        Command::Stop { .. } => Some(CommandAction::Stop),
+        Command::SeekBeat { .. } => Some(CommandAction::SeekBeat),
+        Command::JumpBeats { .. } => Some(CommandAction::JumpBeats),
+        Command::SetVolume { .. } => Some(CommandAction::SetVolume),
+        Command::SetTempo { .. } => Some(CommandAction::SetTempo),
+        Command::SetMaster { .. } => Some(CommandAction::SetMaster),
+        Command::SetLoopBeats { .. } => Some(CommandAction::SetLoopBeats),
+        Command::ClearLoop { .. } => Some(CommandAction::ClearLoop),
+        Command::SetMasterBpm { .. } => Some(CommandAction::SetMasterBpm),
+        Command::Load { .. }
+        | Command::Unload { .. }
+        | Command::RawSeekSeconds { .. }
+        | Command::SetOriginalBpm { .. }
+        | Command::EngageSync { .. }
+        | Command::DisengageSync { .. }
+        | Command::RawSetLoopSeconds { .. }
+        | Command::Schedule { .. }
+        | Command::SetClockSubscription { .. }
+        | Command::ClearClockSubscription { .. } => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -802,6 +1057,7 @@ mod tests {
     use super::{Engine, EngineConfig};
     use crate::commands::QuantizeMode;
     use crate::deck::DecodedTrack;
+    use crate::telemetry::EngineEvent;
 
     fn click_track(bpm: f64, seconds: f64) -> DecodedTrack {
         let sample_rate = 48_000;
@@ -884,5 +1140,39 @@ mod tests {
             .all(|sample| sample.abs() < 1.0e-6));
         assert!(!engine.deck(deck).unwrap().playing);
         assert_eq!(engine.current_global_frame(), 48_000);
+    }
+
+    #[test]
+    fn clock_subscription_emits_exact_master_beat_frames() {
+        let (_command_tx, command_rx) = rtrb::RingBuffer::new(1);
+        let (telemetry_tx, _telemetry_rx) = rtrb::RingBuffer::new(1);
+        let (event_tx, mut event_rx) = rtrb::RingBuffer::new(16);
+        let mut engine =
+            Engine::with_rings(EngineConfig::default(), command_rx, telemetry_tx, event_tx);
+        engine
+            .handle_command(crate::Command::SetClockSubscription {
+                subscription_id: 7,
+                interval_beats: 0.5,
+            })
+            .unwrap();
+
+        let mut out = vec![0.0; 48_000 * 2];
+        engine.process_offline(48_000, &mut out);
+
+        let mut frames = Vec::new();
+        while let Ok(event) = event_rx.pop() {
+            if let EngineEvent::ClockTick {
+                subscription_id,
+                global_frame,
+                global_master_beat,
+                ..
+            } = event
+            {
+                assert_eq!(subscription_id, 7);
+                frames.push((global_frame, global_master_beat));
+            }
+        }
+
+        assert_eq!(frames, vec![(12_000, 0.5), (24_000, 1.0), (36_000, 1.5)]);
     }
 }

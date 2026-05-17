@@ -117,6 +117,23 @@ pub struct ScheduleParams {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct SubscribeParams {
+    #[serde(default)]
+    pub events: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SubscribeClockParams {
+    pub interval_beats: Option<f64>,
+    pub subdivisions_per_beat: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UnsubscribeClockParams {
+    pub subscription_id: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct AnalyzeParams {
     pub path: String,
     #[serde(default = "default_peak_points")]

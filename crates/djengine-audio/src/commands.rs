@@ -85,4 +85,11 @@ pub enum Command {
         offset_beats: f64,
         command: Box<Command>,
     },
+    SetClockSubscription {
+        subscription_id: u64,
+        interval_beats: f64,
+    },
+    ClearClockSubscription {
+        subscription_id: u64,
+    },
 }

@@ -8,12 +8,13 @@ use std::time::Duration;
 use anyhow::{anyhow, Context};
 use djengine_analysis::{decode_file, extract_beats_with_bpm_hint, extract_peaks, read_bpm_tag};
 use djengine_audio::backend::{Backend, CpalBackend};
-use djengine_audio::{Command, DecodedTrack, Engine, EngineConfig, Tick};
+use djengine_audio::{Command, DecodedTrack, Engine, EngineConfig, EngineEvent, Tick};
 use djengine_core::BeatGrid;
 use rtrb::RingBuffer;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::time::{self, Duration as TokioDuration};
 
 use crate::protocol::*;
 use crate::tick_ring::TickRing;
@@ -28,13 +29,14 @@ pub async fn run_stdio_server() -> anyhow::Result<()> {
 
     let (command_tx, command_rx) = RingBuffer::<Command>::new(1024);
     let (telemetry_tx, telemetry_rx) = RingBuffer::<Tick>::new(4096);
-    let mut engine = Engine::with_rings(config, command_rx, telemetry_tx);
+    let (event_tx, event_rx) = RingBuffer::<EngineEvent>::new(4096);
+    let mut engine = Engine::with_rings(config, command_rx, telemetry_tx, event_tx);
     let stream = CpalBackend
         .start(move |output, _info| engine.process(output))
         .context("failed to start CPAL output")?;
 
     let tick_thread = spawn_tick_writer(telemetry_rx);
-    let result = serve_lines(command_tx).await;
+    let result = serve_lines(command_tx, event_rx).await;
     drop(stream);
     if let Some((running, handle)) = tick_thread {
         running.store(false, Ordering::Release);
@@ -43,23 +45,108 @@ pub async fn run_stdio_server() -> anyhow::Result<()> {
     result
 }
 
-async fn serve_lines(mut command_tx: rtrb::Producer<Command>) -> anyhow::Result<()> {
+#[derive(Debug, Default)]
+struct ServerState {
+    subscriptions: EventSubscriptions,
+    next_subscription_id: u64,
+}
+
+#[derive(Debug, Default)]
+struct EventSubscriptions {
+    deck: bool,
+    transport: bool,
+    scheduler: bool,
+    loop_events: bool,
+    sync: bool,
+    master: bool,
+}
+
+impl EventSubscriptions {
+    fn subscribe(&mut self, event: &str) {
+        match event {
+            "all" => {
+                self.deck = true;
+                self.transport = true;
+                self.scheduler = true;
+                self.loop_events = true;
+                self.sync = true;
+                self.master = true;
+            }
+            "deck" => self.deck = true,
+            "transport" => self.transport = true,
+            "scheduler" => self.scheduler = true,
+            "loop" | "loops" => self.loop_events = true,
+            "sync" => self.sync = true,
+            "master" => self.master = true,
+            _ => {}
+        }
+    }
+
+    fn unsubscribe(&mut self, event: &str) {
+        match event {
+            "all" => *self = Self::default(),
+            "deck" => self.deck = false,
+            "transport" => self.transport = false,
+            "scheduler" => self.scheduler = false,
+            "loop" | "loops" => self.loop_events = false,
+            "sync" => self.sync = false,
+            "master" => self.master = false,
+            _ => {}
+        }
+    }
+
+    fn allows(&self, event: &EngineEvent) -> bool {
+        match event {
+            EngineEvent::DeckLoaded { .. } | EngineEvent::DeckUnloaded { .. } => self.deck,
+            EngineEvent::TransportStarted { .. }
+            | EngineEvent::TransportPaused { .. }
+            | EngineEvent::TransportStopped { .. } => self.transport,
+            EngineEvent::LoopChanged { .. } | EngineEvent::LoopCleared { .. } => self.loop_events,
+            EngineEvent::SyncChanged { .. } => self.sync,
+            EngineEvent::MasterBpmChanged { .. } => self.master,
+            EngineEvent::ScheduledArmed { .. } | EngineEvent::ScheduledFired { .. } => {
+                self.scheduler
+            }
+            EngineEvent::ClockTick { .. } => true,
+        }
+    }
+}
+
+async fn serve_lines(
+    mut command_tx: rtrb::Producer<Command>,
+    mut event_rx: rtrb::Consumer<EngineEvent>,
+) -> anyhow::Result<()> {
     let stdin = BufReader::new(io::stdin());
     let mut lines = stdin.lines();
     let mut stdout = io::stdout();
+    let mut state = ServerState {
+        subscriptions: EventSubscriptions::default(),
+        next_subscription_id: 1,
+    };
+    let mut event_poll = time::interval(TokioDuration::from_millis(5));
 
-    while let Some(line) = lines.next_line().await? {
-        if line.trim().is_empty() {
-            continue;
+    loop {
+        tokio::select! {
+            line = lines.next_line() => {
+                let Some(line) = line? else {
+                    break;
+                };
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let response = match serde_json::from_str::<RpcRequest>(&line) {
+                    Ok(request) => handle_request(request, &mut command_tx, &mut state).await,
+                    Err(err) => RpcResponse::err(None, -32_700, format!("parse error: {err}")),
+                };
+                let encoded = serde_json::to_string(&response)?;
+                stdout.write_all(encoded.as_bytes()).await?;
+                stdout.write_all(b"\n").await?;
+                stdout.flush().await?;
+            }
+            _ = event_poll.tick() => {
+                drain_events(&mut event_rx, &state.subscriptions, &mut stdout).await?;
+            }
         }
-        let response = match serde_json::from_str::<RpcRequest>(&line) {
-            Ok(request) => handle_request(request, &mut command_tx).await,
-            Err(err) => RpcResponse::err(None, -32_700, format!("parse error: {err}")),
-        };
-        let encoded = serde_json::to_string(&response)?;
-        stdout.write_all(encoded.as_bytes()).await?;
-        stdout.write_all(b"\n").await?;
-        stdout.flush().await?;
     }
 
     Ok(())
@@ -68,6 +155,7 @@ async fn serve_lines(mut command_tx: rtrb::Producer<Command>) -> anyhow::Result<
 async fn handle_request(
     request: RpcRequest,
     command_tx: &mut rtrb::Producer<Command>,
+    state: &mut ServerState,
 ) -> RpcResponse {
     let id = request.id.clone();
     let result = match request.method.as_str() {
@@ -197,6 +285,10 @@ async fn handle_request(
         "quantized_set_master_bpm" | "quantized_set_global_master_bpm" => {
             schedule_alias("set_master_bpm", request.params, command_tx)
         }
+        "subscribe" => subscribe(request.params, state),
+        "unsubscribe" => unsubscribe(request.params, state),
+        "subscribe_clock" => subscribe_clock(request.params, command_tx, state),
+        "unsubscribe_clock" => unsubscribe_clock(request.params, command_tx),
         "ping" => Ok(json!({"pong": true})),
         other => Err(anyhow!("unknown method {other}")),
     };
@@ -358,6 +450,109 @@ fn scheduled_inner_command(action: &str, params: Value) -> anyhow::Result<Comman
     }
 }
 
+fn subscribe(params: Value, state: &mut ServerState) -> anyhow::Result<Value> {
+    let params = parse::<SubscribeParams>(params)?;
+    let events = if params.events.is_empty() {
+        vec!["all".to_string()]
+    } else {
+        params.events
+    };
+    for event in &events {
+        state.subscriptions.subscribe(event);
+    }
+    Ok(json!({ "events": events }))
+}
+
+fn unsubscribe(params: Value, state: &mut ServerState) -> anyhow::Result<Value> {
+    let params = parse::<SubscribeParams>(params)?;
+    let events = if params.events.is_empty() {
+        vec!["all".to_string()]
+    } else {
+        params.events
+    };
+    for event in &events {
+        state.subscriptions.unsubscribe(event);
+    }
+    Ok(json!({ "events": events }))
+}
+
+fn subscribe_clock(
+    params: Value,
+    command_tx: &mut rtrb::Producer<Command>,
+    state: &mut ServerState,
+) -> anyhow::Result<Value> {
+    let params = parse::<SubscribeClockParams>(params)?;
+    if params.interval_beats.is_some() && params.subdivisions_per_beat.is_some() {
+        return Err(anyhow!(
+            "use either interval_beats or subdivisions_per_beat, not both"
+        ));
+    }
+    let interval_beats = match (params.interval_beats, params.subdivisions_per_beat) {
+        (Some(interval), None) => interval,
+        (None, Some(subdivisions)) if subdivisions > 0 => 1.0 / f64::from(subdivisions),
+        (None, None) => 1.0,
+        _ => return Err(anyhow!("invalid clock subscription")),
+    };
+    if !interval_beats.is_finite() || interval_beats <= 0.0 {
+        return Err(anyhow!("invalid clock interval"));
+    }
+
+    if state.next_subscription_id == 0 {
+        state.next_subscription_id = 1;
+    }
+    let subscription_id = state.next_subscription_id;
+    state.next_subscription_id = state.next_subscription_id.saturating_add(1);
+    push(
+        command_tx,
+        Command::SetClockSubscription {
+            subscription_id,
+            interval_beats,
+        },
+    )?;
+    Ok(json!({
+        "subscription_id": subscription_id,
+        "interval_beats": interval_beats
+    }))
+}
+
+fn unsubscribe_clock(
+    params: Value,
+    command_tx: &mut rtrb::Producer<Command>,
+) -> anyhow::Result<Value> {
+    let params = parse::<UnsubscribeClockParams>(params)?;
+    push(
+        command_tx,
+        Command::ClearClockSubscription {
+            subscription_id: params.subscription_id,
+        },
+    )
+}
+
+async fn drain_events(
+    event_rx: &mut rtrb::Consumer<EngineEvent>,
+    subscriptions: &EventSubscriptions,
+    stdout: &mut io::Stdout,
+) -> anyhow::Result<()> {
+    let mut wrote = false;
+    while let Ok(event) = event_rx.pop() {
+        if !subscriptions.allows(&event) {
+            continue;
+        }
+        let notification = RpcNotification {
+            method: "event".to_string(),
+            params: serde_json::to_value(event)?,
+        };
+        let encoded = serde_json::to_string(&notification)?;
+        stdout.write_all(encoded.as_bytes()).await?;
+        stdout.write_all(b"\n").await?;
+        wrote = true;
+    }
+    if wrote {
+        stdout.flush().await?;
+    }
+    Ok(())
+}
+
 async fn analyze(params: Value) -> anyhow::Result<Value> {
     let params = parse::<AnalyzeParams>(params)?;
     let result = tokio::task::spawn_blocking(move || -> anyhow::Result<AnalysisResult> {
@@ -493,7 +688,7 @@ mod tests {
 
     use crate::protocol::RpcRequest;
 
-    use super::handle_request;
+    use super::{handle_request, ServerState};
 
     const SAMPLE_RATE: u32 = 48_000;
 
@@ -547,6 +742,7 @@ mod tests {
         std::fs::write(&path, click_track_wav(120.0, 4.0)).unwrap();
 
         let (mut command_tx, _command_rx) = rtrb::RingBuffer::<djengine_audio::Command>::new(1);
+        let mut state = ServerState::default();
         let response = handle_request(
             RpcRequest {
                 id: Some(json!(1)),
@@ -558,6 +754,7 @@ mod tests {
                 }),
             },
             &mut command_tx,
+            &mut state,
         )
         .await;
 
@@ -579,6 +776,7 @@ mod tests {
     #[tokio::test]
     async fn quantized_stop_enqueues_scheduled_stop() {
         let (mut command_tx, mut command_rx) = rtrb::RingBuffer::<djengine_audio::Command>::new(1);
+        let mut state = ServerState::default();
         let response = handle_request(
             RpcRequest {
                 id: Some(json!(2)),
@@ -590,6 +788,7 @@ mod tests {
                 }),
             },
             &mut command_tx,
+            &mut state,
         )
         .await;
 
@@ -609,5 +808,39 @@ mod tests {
             panic!("expected scheduled stop");
         };
         assert_eq!(deck_id, 3);
+    }
+
+    #[tokio::test]
+    async fn subscribe_clock_enqueues_clock_subscription() {
+        let (mut command_tx, mut command_rx) = rtrb::RingBuffer::<djengine_audio::Command>::new(1);
+        let mut state = ServerState::default();
+        let response = handle_request(
+            RpcRequest {
+                id: Some(json!(3)),
+                method: "subscribe_clock".to_string(),
+                params: json!({
+                    "subdivisions_per_beat": 8
+                }),
+            },
+            &mut command_tx,
+            &mut state,
+        )
+        .await;
+
+        assert!(response.error.is_none());
+        let result = response.result.unwrap();
+        assert_eq!(result["subscription_id"], 1);
+        assert_eq!(result["interval_beats"], 0.125);
+
+        let command = command_rx.pop().unwrap();
+        let djengine_audio::Command::SetClockSubscription {
+            subscription_id,
+            interval_beats,
+        } = command
+        else {
+            panic!("expected clock subscription command");
+        };
+        assert_eq!(subscription_id, 1);
+        assert_eq!(interval_beats, 0.125);
     }
 }
