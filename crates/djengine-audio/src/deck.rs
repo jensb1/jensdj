@@ -11,6 +11,7 @@ const MAX_TEMPO_RATIO: f64 = 4.0;
 const DIRECT_RATIO_EPSILON: f64 = 0.002;
 const TRANSIENT_LOCK_FULL_SECONDS: f64 = 0.015;
 const TRANSIENT_LOCK_FADE_SECONDS: f64 = 0.010;
+const LOOP_CROSSFADE_SECONDS: f64 = 0.005;
 
 #[derive(Debug, Clone)]
 pub struct DecodedTrack {
@@ -250,10 +251,8 @@ impl Deck {
                 continue;
             }
 
-            let base = source.floor() as usize;
-            let frac = (source - base as f64) as f32;
             for out_ch in 0..output_channels {
-                let sample = sample_interpolated(&self.track, base, frac, out_ch) * volume;
+                let sample = self.sample_at_source(source, out_ch) * volume;
                 output[frame_idx * output_channels + out_ch] += sample;
             }
         }
@@ -302,12 +301,10 @@ impl Deck {
                 filled_input_frames += 1;
                 continue;
             }
-            let frame_base = source.floor() as usize;
-            let frac = (source - frame_base as f64) as f32;
             let body_gain = 1.0 - self.transient_body_protection_weight(source).unwrap_or(0.0);
             for ch in 0..channels {
                 self.stretch_input[input_frame * channels + ch] =
-                    sample_interpolated(&self.track, frame_base, frac, ch) * body_gain;
+                    self.sample_at_source(source, ch) * body_gain;
             }
             filled_input_frames += 1;
         }
@@ -339,9 +336,7 @@ impl Deck {
                 let stretched = self.stretch_output[frame * channels + src_ch];
                 let sample = match (direct_source, direct_weight > 0.0) {
                     (Some(source), true) => {
-                        let base = source.floor() as usize;
-                        let frac = (source - base as f64) as f32;
-                        let direct = sample_interpolated(&self.track, base, frac, out_ch);
+                        let direct = self.sample_at_source(source, out_ch);
                         stretched * (1.0 - direct_weight) + direct * direct_weight
                     }
                     _ => stretched,
@@ -397,7 +392,6 @@ impl Deck {
         let len = (loop_end - loop_start).max(1.0);
         let wrapped = loop_start + (source - loop_start).rem_euclid(len);
         self.position.seek(global_frame, wrapped);
-        self.reset_stretcher();
     }
 
     fn frames_until_loop_wrap(&self, global_frame: u64) -> Option<usize> {
@@ -423,6 +417,31 @@ impl Deck {
         } else {
             Some(source)
         }
+    }
+
+    fn sample_at_source(&self, source: f64, out_channel: usize) -> f32 {
+        let source = self.loop_adjusted_source(source);
+        let Some((loop_start, loop_end)) = self.loop_state.frames(self.track.sample_rate) else {
+            return sample_interpolated_at_source(&self.track, source, out_channel);
+        };
+
+        let loop_len = loop_end - loop_start;
+        let crossfade_frames = (LOOP_CROSSFADE_SECONDS * f64::from(self.track.sample_rate.max(1)))
+            .min(loop_len * 0.25);
+        if crossfade_frames <= 1.0 {
+            return sample_interpolated_at_source(&self.track, source, out_channel);
+        }
+
+        let crossfade_start = loop_end - crossfade_frames;
+        if source < crossfade_start || source >= loop_end {
+            return sample_interpolated_at_source(&self.track, source, out_channel);
+        }
+
+        let phase = ((source - crossfade_start) / crossfade_frames).clamp(0.0, 1.0) as f32;
+        let wrapped_source = loop_start + (source - crossfade_start);
+        let tail = sample_interpolated_at_source(&self.track, source, out_channel);
+        let head = sample_interpolated_at_source(&self.track, wrapped_source, out_channel);
+        tail * (1.0 - phase) + head * phase
     }
 
     fn transient_beat_delta_frames(&self, source_frame: f64) -> Option<f64> {
@@ -551,4 +570,13 @@ fn sample_interpolated(
     let a = track.samples.get(idx0).copied().unwrap_or(0.0);
     let b = track.samples.get(idx1).copied().unwrap_or(a);
     a + (b - a) * frac
+}
+
+fn sample_interpolated_at_source(track: &DecodedTrack, source: f64, out_channel: usize) -> f32 {
+    if source < 0.0 || !source.is_finite() {
+        return 0.0;
+    }
+    let base = source.floor() as usize;
+    let frac = (source - base as f64) as f32;
+    sample_interpolated(track, base, frac, out_channel)
 }
