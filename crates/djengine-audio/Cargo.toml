@@ -1,0 +1,21 @@
+[package]
+name = "djengine-audio"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+arc-swap.workspace = true
+basedrop.workspace = true
+cpal.workspace = true
+djengine-core = { path = "../djengine-core" }
+rtrb.workspace = true
+serde.workspace = true
+signalsmith-stretch.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+djengine-analysis = { path = "../djengine-analysis" }
+
